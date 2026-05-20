@@ -6,7 +6,7 @@
 - SQLite
 - 本地文件存储
 - `pypdf` / `python-docx` 文本提取
-- 真实大模型审核服务接入
+- DeepSeek 审核服务接入
 - mock 审核兜底
 
 ## 目录结构
@@ -57,14 +57,15 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8010
 - 历史记录接口已补充 `id`、`title`、`status_text`、`completed_at`
 - 审核结果接口除 `result` 外，也会返回 `summary` 和 `risks` 兼容字段
 
-## 真实模型配置
+## DeepSeek 配置
 
-后端已支持通过环境变量接入真实大模型审核服务：
+后端已支持通过环境变量接入 DeepSeek 审核服务：
 
 ```powershell
-$env:OPENAI_API_KEY="your_key"
-$env:OPENAI_BASE_URL="https://api.openai.com/v1"
-$env:OPENAI_MODEL="gpt-4.1-mini"
+$env:AUDIT_PROVIDER="deepseek"
+$env:DEEPSEEK_API_KEY="your_key"
+$env:DEEPSEEK_BASE_URL="https://api.deepseek.com"
+$env:DEEPSEEK_MODEL="deepseek-v4-flash"
 $env:AUDIT_MODEL_TIMEOUT_SECONDS="40"
 $env:AUDIT_MODEL_MAX_RETRIES="2"
 $env:AUDIT_MODEL_RETRY_BACKOFF_SECONDS="1.5"
@@ -72,9 +73,9 @@ $env:AUDIT_ALLOW_MOCK_FALLBACK="true"
 ```
 
 说明：
-- 已配置 `OPENAI_API_KEY` 时，审核优先走真实模型
-- 未配置密钥，或真实模型调用失败且允许兜底时，会自动降级到 mock 审核
-- 无论走真实模型还是兜底，返回 JSON 结构保持一致
+- 配置 `DEEPSEEK_API_KEY` 后，审核优先走 DeepSeek
+- 如果 DeepSeek 调用失败且允许兜底，会自动降级到 mock
+- 无论走 DeepSeek 还是 mock，接口返回 JSON 结构保持一致
 
 ## 当前生产化机制
 
@@ -82,4 +83,4 @@ $env:AUDIT_ALLOW_MOCK_FALLBACK="true"
 - 重试策略：请求失败后按固定次数重试
 - 失败兜底：可配置为失败即报错，或自动降级到 mock
 - 结果规范化：所有审核结果都会经过统一结构化清洗
-- 日志记录：记录模型调用成功、失败、重试、降级情况
+- 日志记录：记录 DeepSeek 成功、失败、重试、降级情况

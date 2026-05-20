@@ -27,6 +27,10 @@ AUDIT_MODEL_BASE_URL = (
     or "https://api.openai.com/v1"
 ).rstrip("/")
 AUDIT_MODEL_NAME = os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL") or "gpt-4.1-mini"
+AUDIT_PROVIDER = (os.getenv("AUDIT_PROVIDER") or "deepseek").strip().lower()
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY") or os.getenv("LLM_API_KEY")
+DEEPSEEK_BASE_URL = (os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com").rstrip("/")
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL") or "deepseek-v4-flash"
 AUDIT_MODEL_TIMEOUT_SECONDS = float(os.getenv("AUDIT_MODEL_TIMEOUT_SECONDS", "40"))
 AUDIT_MODEL_MAX_RETRIES = int(os.getenv("AUDIT_MODEL_MAX_RETRIES", "2"))
 AUDIT_MODEL_RETRY_BACKOFF_SECONDS = float(os.getenv("AUDIT_MODEL_RETRY_BACKOFF_SECONDS", "1.5"))
