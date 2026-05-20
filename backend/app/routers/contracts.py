@@ -25,12 +25,12 @@ from ..schemas import (
     TextSubmitResponse,
     UploadResponse,
 )
-from ..services.audit_service import MockAuditService
+from ..services.audit_service import AuditService
 from ..services.file_storage import build_storage_path, validate_upload
 from ..services.text_parser import normalize_text, parse_contract_bytes
 
 router = APIRouter(prefix="/api/v1/contracts", tags=["contracts"])
-audit_service = MockAuditService()
+audit_service = AuditService()
 
 
 def _status_text(status: str) -> str:
