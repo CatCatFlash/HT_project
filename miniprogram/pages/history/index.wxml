@@ -1,0 +1,26 @@
+<view class="page-shell history-page">
+  <view wx:if="{{!records.length}}" class="section-card empty-card">
+    <view class="section-title">还没有审核记录</view>
+    <view class="muted-text empty-text">先完成一次合同初审，这里会保留你的历史结果，方便回看和继续讨论修改建议。</view>
+    <navigator class="button-primary inline-nav" url="/pages/input/index?mode=text">去提交合同</navigator>
+  </view>
+
+  <view wx:else class="history-list">
+    <view wx:for="{{records}}" wx:key="id" class="section-card history-card">
+      <view class="history-header">
+        <view class="history-title">{{item.title}}</view>
+        <view class="history-time">{{item.completedAt || item.createdAt}}</view>
+      </view>
+
+      <view class="history-meta">来源：{{item.sourceType === 'file' ? '上传文件' : '粘贴文本'}}</view>
+      <view class="history-meta">状态：{{item.statusText}}</view>
+      <view class="history-meta">风险：高 {{item.highRisks || 0}} / 中 {{item.mediumRisks || 0}} / 低 {{item.lowRisks || 0}}</view>
+      <view class="history-meta">总计：{{item.totalRisks || 0}} 项</view>
+
+      <view class="history-actions">
+        <button class="button-secondary history-button" data-id="{{item.taskId}}" data-status="{{item.status}}" bindtap="openDetail">查看详情</button>
+        <button class="button-secondary history-button danger-button" data-id="{{item.taskId}}" bindtap="deleteRecord">删除记录</button>
+      </view>
+    </view>
+  </view>
+</view>
