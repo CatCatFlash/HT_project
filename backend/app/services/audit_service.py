@@ -8,13 +8,17 @@ from urllib import error, request
 from ..config import (
     AUDIT_ALLOW_MOCK_FALLBACK,
     AUDIT_MODEL_MAX_INPUT_CHARS,
+    AUDIT_MODEL_MAX_OUTPUT_TOKENS,
     AUDIT_MODEL_MAX_RETRIES,
     AUDIT_MODEL_RETRY_BACKOFF_SECONDS,
     AUDIT_MODEL_TIMEOUT_SECONDS,
+    AUDIT_PROFILE,
     AUDIT_PROVIDER,
+    AUDIT_REQUIRE_CONTRACT_KEYWORDS,
     DEEPSEEK_API_KEY,
     DEEPSEEK_BASE_URL,
     DEEPSEEK_MODEL,
+    DEEPSEEK_THINKING_DISABLED,
     LOG_LEVEL,
 )
 from ..exceptions import AuditError
@@ -30,38 +34,34 @@ if not logging.getLogger().handlers:
     )
 
 
-SYSTEM_PROMPT = """你是 AI 合同初审助手的后端审核服务，只能输出结构化 JSON。
+SYSTEM_PROMPT = """你是合同初审助手，只能输出一个 JSON 对象。
 
-你的任务是基于合同原文做通用初审，不得输出法律结论，不得编造合同中不存在的内容。
-
-必须遵守以下规则：
-1. 只输出一个 JSON 对象，不要输出 markdown、代码块或额外说明。
-2. JSON 顶层必须包含：
-   - overall_message: string
-   - risks: array
-3. risks 中每一项必须包含：
-   - title: string
-   - level: high | medium | low
-   - reason: string
-   - suggestion: string
-4. 只有在合同原文中能找到直接依据时，才输出对应风险；证据不足时，不要过度推断。
-5. 如果文本明显乱码、缺失严重、过短或无法支撑正常审阅，不要泛化罗列大量风险。
-   这种情况下只返回 1 到 2 个低风险或中风险提醒，明确说明“文本可读性不足”或“信息不足”。
-6. 风险名称、原因、建议必须互相一致：
-   - title 说的是什么风险
-   - reason 就解释该风险为什么成立
-   - suggestion 就给出对应的补充或修改建议
-7. overall_message 要准确反映文本质量与整体判断，不要夸大结论。
+要求：
+1. 只能基于给定合同原文判断，不要编造不存在的条款。
+2. 输出格式必须是：
+{
+  "overall_message": "字符串",
+  "risks": [
+    {
+      "title": "字符串",
+      "level": "high|medium|low",
+      "reason": "字符串",
+      "suggestion": "字符串"
+    }
+  ]
+}
+3. 最多返回 3 条风险。
+4. 如果文本过短、可读性差或证据不足，只返回 1 到 2 条提醒，不要泛化推断。
+5. 风险标题、原因、建议必须互相一致，且必须围绕合同条款本身。
 """
 
 
 def _build_user_prompt(parsed_text: str) -> str:
     readability = assess_text_readability(parsed_text)
     return (
-        "请根据下面的合同文本输出通用合同初审结果。\n"
-        "请优先关注合同主体、付款条款、违约责任、解除条款、自动续约、争议解决、验收标准、保密条款、知识产权等风险。\n"
-        "如果文本可读性差、内容缺失严重或证据不足，请减少风险数量，并明确说明原因。\n"
-        "请直接输出 JSON 对象。\n\n"
+        "请审查下面合同文本，只输出 JSON。\n"
+        "重点关注付款、验收、违约、续约、保密、知识产权、争议解决。\n"
+        "如果原文没有直接证据，不要推断。\n"
         f"文本可读性参考：{json.dumps(readability, ensure_ascii=False)}\n\n"
         f"合同文本：\n{parsed_text}"
     )
@@ -95,10 +95,10 @@ class MockAuditService:
         if "违约" in text or "赔偿" in text:
             risks.append(
                 {
-                    "title": "违约责任需要重点核查",
+                    "title": "违约责任需重点核查",
                     "level": "high",
-                    "reason": "合同提到了违约或赔偿，但若责任边界、赔偿范围或上限不清晰，后续容易产生争议。",
-                    "suggestion": "建议明确违约责任触发条件、赔偿范围、计算方式和责任上限，避免责任明显失衡。",
+                    "reason": "合同提到了违约或赔偿，但责任边界、赔偿范围或上限不够清晰时，后续容易产生争议。",
+                    "suggestion": "建议明确违约责任触发条件、赔偿范围、计算方式和责任上限。",
                 }
             )
         if "付款" in text or "支付" in text:
@@ -119,21 +119,12 @@ class MockAuditService:
                     "suggestion": "建议增加续约提醒和通知期限，并明确书面拒绝续约的操作方式。",
                 }
             )
-        if "争议" in text or "仲裁" in text or "法院" in text:
-            risks.append(
-                {
-                    "title": "争议解决条款需要确认",
-                    "level": "low",
-                    "reason": "争议解决地、管辖法院或仲裁机构若明显偏向对方，会增加后续维权成本。",
-                    "suggestion": "建议确认争议解决方式、适用法律和管辖地是否合理，尽量选择可接受地点。",
-                }
-            )
         if "保密" not in text and "confidential" not in lowered:
             risks.append(
                 {
                     "title": "保密条款可能缺失",
                     "level": "medium",
-                    "reason": "文本中未明显体现保密义务，商业信息、报价或数据保护可能不够充分。",
+                    "reason": "文本中未明显体现保密义务，商业信息或数据保护可能不够充分。",
                     "suggestion": "建议补充保密范围、保密期限、例外情形和违约责任。",
                 }
             )
@@ -144,14 +135,14 @@ class MockAuditService:
                     "title": "建议人工复核关键条款",
                     "level": "low",
                     "reason": "当前文本未识别出明显高频风险，但这并不代表合同不存在法律或商务风险。",
-                    "suggestion": "建议重点复核合同主体、付款、违约、解除、争议解决和知识产权相关条款。",
+                    "suggestion": "建议重点复核付款、违约、解除、争议解决和知识产权相关条款。",
                 }
             ]
 
         return normalize_audit_result(
             {
                 "overall_message": "本次为通用合同初审结果，建议优先处理高风险条款，复杂场景仍需专业法务复核。",
-                "risks": risks,
+                "risks": risks[:3],
             }
         )
 
@@ -165,6 +156,8 @@ class DeepSeekAuditService:
         self.max_retries = AUDIT_MODEL_MAX_RETRIES
         self.retry_backoff_seconds = AUDIT_MODEL_RETRY_BACKOFF_SECONDS
         self.max_input_chars = AUDIT_MODEL_MAX_INPUT_CHARS
+        self.max_output_tokens = AUDIT_MODEL_MAX_OUTPUT_TOKENS
+        self.disable_thinking = DEEPSEEK_THINKING_DISABLED
 
     def is_configured(self) -> bool:
         return bool(self.api_key)
@@ -179,74 +172,89 @@ class DeepSeekAuditService:
         attempts = self.max_retries + 1
 
         for attempt in range(1, attempts + 1):
+            started = time.time()
             try:
                 raw_result = self._call_chat_completions_api(clipped_text)
                 parsed_result = self._extract_json_payload(raw_result)
                 normalized_result = normalize_audit_result(parsed_result)
                 self._validate_result_quality(normalized_result, clipped_text)
                 logger.info(
-                    "audit model call succeeded provider=deepseek model=%s attempt=%s total_risks=%s",
+                    "audit model call succeeded provider=deepseek profile=%s model=%s attempt=%s elapsed=%.2fs total_risks=%s",
+                    AUDIT_PROFILE,
                     self.model,
                     attempt,
+                    time.time() - started,
                     normalized_result["total_risks"],
                 )
                 return normalized_result
             except AuditError as exc:
                 last_error = exc
-                if not self._is_retryable_audit_error(exc) or attempt >= attempts:
-                    raise
                 logger.warning(
-                    "deepseek returned retryable result, retrying attempt=%s/%s code=%s",
+                    "deepseek audit error provider=deepseek profile=%s model=%s attempt=%s code=%s",
+                    AUDIT_PROFILE,
+                    self.model,
                     attempt,
-                    attempts,
                     exc.code,
                 )
+                if not self._is_retryable_audit_error(exc) or attempt >= attempts:
+                    raise
             except error.HTTPError as exc:
                 last_error = exc
                 mapped_error = self._map_http_error(exc)
+                logger.warning(
+                    "deepseek http error provider=deepseek profile=%s model=%s attempt=%s status=%s",
+                    AUDIT_PROFILE,
+                    self.model,
+                    attempt,
+                    exc.code,
+                )
                 if mapped_error and not self._is_retryable_audit_error(mapped_error):
                     raise mapped_error from exc
                 if attempt >= attempts:
                     if mapped_error:
                         raise mapped_error from exc
                     break
-                logger.warning(
-                    "deepseek request failed, retrying attempt=%s/%s status=%s",
-                    attempt,
-                    attempts,
-                    exc.code,
-                )
             except (error.URLError, TimeoutError, socket.timeout, json.JSONDecodeError, ValueError) as exc:
                 last_error = exc
-                if attempt >= attempts:
-                    break
                 logger.warning(
-                    "deepseek request failed, retrying attempt=%s/%s error=%s",
+                    "deepseek request failed provider=deepseek profile=%s model=%s attempt=%s error=%s",
+                    AUDIT_PROFILE,
+                    self.model,
                     attempt,
-                    attempts,
                     exc,
                 )
+                if attempt >= attempts:
+                    break
+
             time.sleep(self.retry_backoff_seconds * attempt)
 
-        logger.exception("deepseek call failed after retries", exc_info=last_error)
+        logger.exception(
+            "deepseek call failed after retries provider=deepseek profile=%s model=%s",
+            AUDIT_PROFILE,
+            self.model,
+            exc_info=last_error,
+        )
         if isinstance(last_error, AuditError):
             raise last_error
         raise AuditError("DEEPSEEK_TIMEOUT", "DeepSeek 审核超时，请稍后重试", 504)
 
     def _call_chat_completions_api(self, parsed_text: str) -> dict[str, Any]:
-        payload = {
+        payload: dict[str, Any] = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": _build_user_prompt(parsed_text)},
             ],
             "response_format": {"type": "json_object"},
-            "max_tokens": 1400,
-            "temperature": 0.2,
+            "max_tokens": self.max_output_tokens,
+            "stream": False,
         }
+        if self.disable_thinking:
+            payload["thinking"] = {"type": "disabled"}
+
         req = request.Request(
             url=f"{self.base_url}/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json; charset=utf-8",
@@ -269,12 +277,18 @@ class DeepSeekAuditService:
         readability = assess_text_readability(parsed_text)
         if normalized_result["total_risks"] <= 0:
             raise AuditError("AUDIT_EMPTY_RESULT", "DeepSeek 未返回有效审核结果，请稍后重试", 502)
+        if normalized_result["total_risks"] > 3:
+            raise AuditError("AUDIT_RESULT_OVERINFERRED", "DeepSeek 返回的风险数量超过当前上限，准备重试", 502)
         if not readability["is_readable"] and normalized_result["total_risks"] > 2:
             raise AuditError("AUDIT_RESULT_OVERINFERRED", "DeepSeek 在文本不可读场景下输出了过多风险，准备重试", 502)
         if len(parsed_text) < 150 and normalized_result["high_risks"] > 2:
             raise AuditError("AUDIT_RESULT_OVERINFERRED", "合同文本过短但高风险数量过多，准备重试", 502)
+        if AUDIT_REQUIRE_CONTRACT_KEYWORDS and not _looks_like_contract_audit(normalized_result):
+            raise AuditError("AUDIT_RESULT_DOMAIN_MISMATCH", "DeepSeek 返回内容与合同审核领域不匹配，准备重试", 502)
 
     def _map_http_error(self, exc: error.HTTPError) -> AuditError | None:
+        if exc.code == 400:
+            return AuditError("DEEPSEEK_BAD_REQUEST", "DeepSeek 请求参数不合法，请检查模型参数配置", 502)
         if exc.code == 401:
             return AuditError("DEEPSEEK_AUTH_INVALID", "DeepSeek 鉴权失败，请检查 API Key", 502)
         if exc.code == 408:
@@ -289,6 +303,7 @@ class DeepSeekAuditService:
         return exc.code in {
             "AUDIT_EMPTY_RESULT",
             "AUDIT_RESULT_OVERINFERRED",
+            "AUDIT_RESULT_DOMAIN_MISMATCH",
             "DEEPSEEK_TIMEOUT",
             "DEEPSEEK_UNAVAILABLE",
             "DEEPSEEK_RATE_LIMITED",
@@ -335,3 +350,40 @@ class AuditService:
         result = self.mock_service.analyze(parsed_text)
         result["overall_message"] = f"{result['overall_message']} {suffix}"
         return result
+
+
+def _looks_like_contract_audit(result: dict) -> bool:
+    text = " ".join(
+        [
+            str(result.get("overall_message", "")),
+            *[
+                " ".join(
+                    [
+                        str(item.get("title", "")),
+                        str(item.get("reason", "")),
+                        str(item.get("suggestion", "")),
+                    ]
+                )
+                for item in result.get("risks", [])
+            ],
+        ]
+    ).lower()
+    keywords = [
+        "合同",
+        "条款",
+        "付款",
+        "验收",
+        "违约",
+        "保密",
+        "续约",
+        "争议",
+        "知识产权",
+        "甲方",
+        "乙方",
+        "contract",
+        "payment",
+        "termination",
+        "confidential",
+        "intellectual property",
+    ]
+    return any(keyword.lower() in text for keyword in keywords)
