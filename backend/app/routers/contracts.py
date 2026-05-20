@@ -195,6 +195,9 @@ async def get_audit_result(task_id: str, user_id: str = Depends(get_user_id)) ->
 
     result_record = database.fetch_audit_result(task_id)
     result_payload = result_record.result_json if result_record else None
+    effective_status = task.status
+    if result_payload and task.status == TASK_STATUS_ANALYZING:
+        effective_status = TASK_STATUS_SUCCESS
     summary_payload = None
     risks_payload = None
     if result_payload:
@@ -211,7 +214,7 @@ async def get_audit_result(task_id: str, user_id: str = Depends(get_user_id)) ->
         "success": True,
         "data": AuditResultResponse(
             task_id=task.id,
-            status=task.status,
+            status=effective_status,
             error_code=task.error_code,
             error_message=task.error_message,
             result=result_payload,
@@ -224,26 +227,30 @@ async def get_audit_result(task_id: str, user_id: str = Depends(get_user_id)) ->
 @router.get("/history")
 async def get_history(user_id: str = Depends(get_user_id)) -> dict:
     rows = database.list_tasks(user_id)
-    items = [
-        HistoryItem(
-            id=row["id"],
-            task_id=row["id"],
-            title=_history_title(row["file_name"], row["source_type"]),
-            source_type=row["source_type"],
-            file_name=row["file_name"],
-            status=row["status"],
-            status_text=_status_text(row["status"]),
-            total_risks=row["total_risks"],
-            high_risks=row["high_risks"],
-            medium_risks=row["medium_risks"],
-            low_risks=row["low_risks"],
-            overall_message=row["overall_message"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-            completed_at=row["updated_at"] if row["status"] == TASK_STATUS_SUCCESS else None,
-        ).model_dump()
-        for row in rows
-    ]
+    items = []
+    for row in rows:
+        effective_status = row["status"]
+        if row["overall_message"] and row["status"] == TASK_STATUS_ANALYZING:
+            effective_status = TASK_STATUS_SUCCESS
+        items.append(
+            HistoryItem(
+                id=row["id"],
+                task_id=row["id"],
+                title=_history_title(row["file_name"], row["source_type"]),
+                source_type=row["source_type"],
+                file_name=row["file_name"],
+                status=effective_status,
+                status_text=_status_text(effective_status),
+                total_risks=row["total_risks"],
+                high_risks=row["high_risks"],
+                medium_risks=row["medium_risks"],
+                low_risks=row["low_risks"],
+                overall_message=row["overall_message"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+                completed_at=row["updated_at"] if effective_status == TASK_STATUS_SUCCESS else None,
+            ).model_dump()
+        )
     return {"success": True, "data": {"items": items}}
 
 
