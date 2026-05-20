@@ -46,6 +46,7 @@ class UploadResponse(BaseModel):
     parse_status: TaskStatus
     preview_text: str
     char_count: int
+    page_count: int | None = None
 
 
 class TextSubmitResponse(BaseModel):
@@ -78,13 +79,18 @@ class AuditResultResponse(BaseModel):
     error_code: str | None = None
     error_message: str | None = None
     result: AuditStructuredResult | None = None
+    summary: dict | None = None
+    risks: list[RiskItem] | None = None
 
 
 class HistoryItem(BaseModel):
+    id: str
     task_id: str
+    title: str
     source_type: str
     file_name: str | None
     status: TaskStatus
+    status_text: str
     total_risks: int | None = None
     high_risks: int | None = None
     medium_risks: int | None = None
@@ -92,6 +98,7 @@ class HistoryItem(BaseModel):
     overall_message: str | None = None
     created_at: datetime
     updated_at: datetime
+    completed_at: datetime | None = None
 
 
 class DeleteResponse(BaseModel):

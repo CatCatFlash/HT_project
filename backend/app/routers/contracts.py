@@ -33,6 +33,25 @@ router = APIRouter(prefix="/api/v1/contracts", tags=["contracts"])
 audit_service = MockAuditService()
 
 
+def _status_text(status: str) -> str:
+    mapping = {
+        "uploaded": "已上传",
+        "parsed": "已解析",
+        "analyzing": "审核中",
+        "success": "审核完成",
+        "failed": "审核失败",
+    }
+    return mapping.get(status, status)
+
+
+def _history_title(file_name: str | None, source_type: str) -> str:
+    if file_name:
+        return file_name
+    if source_type == SOURCE_TYPE_TEXT:
+        return "粘贴合同内容"
+    return "未命名合同"
+
+
 @router.post("/upload")
 async def upload_contract(
     file: UploadFile = File(...),
@@ -176,6 +195,17 @@ async def get_audit_result(task_id: str, user_id: str = Depends(get_user_id)) ->
 
     result_record = database.fetch_audit_result(task_id)
     result_payload = result_record.result_json if result_record else None
+    summary_payload = None
+    risks_payload = None
+    if result_payload:
+        summary_payload = {
+            "total_risks": result_payload["total_risks"],
+            "high_risks": result_payload["high_risks"],
+            "medium_risks": result_payload["medium_risks"],
+            "low_risks": result_payload["low_risks"],
+            "overall_message": result_payload["overall_message"],
+        }
+        risks_payload = result_payload["risks"]
 
     return {
         "success": True,
@@ -185,6 +215,8 @@ async def get_audit_result(task_id: str, user_id: str = Depends(get_user_id)) ->
             error_code=task.error_code,
             error_message=task.error_message,
             result=result_payload,
+            summary=summary_payload,
+            risks=risks_payload,
         ).model_dump(),
     }
 
@@ -194,10 +226,13 @@ async def get_history(user_id: str = Depends(get_user_id)) -> dict:
     rows = database.list_tasks(user_id)
     items = [
         HistoryItem(
+            id=row["id"],
             task_id=row["id"],
+            title=_history_title(row["file_name"], row["source_type"]),
             source_type=row["source_type"],
             file_name=row["file_name"],
             status=row["status"],
+            status_text=_status_text(row["status"]),
             total_risks=row["total_risks"],
             high_risks=row["high_risks"],
             medium_risks=row["medium_risks"],
@@ -205,6 +240,7 @@ async def get_history(user_id: str = Depends(get_user_id)) -> dict:
             overall_message=row["overall_message"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            completed_at=row["updated_at"] if row["status"] == TASK_STATUS_SUCCESS else None,
         ).model_dump()
         for row in rows
     ]
