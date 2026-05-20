@@ -1,0 +1,11 @@
+backend/.venv/
+backend/__pycache__/
+backend/app/__pycache__/
+backend/app/routers/__pycache__/
+backend/app/services/__pycache__/
+backend/.pytest_cache/
+backend/uploads/
+backend/data/
+backend/*.db
+backend/*.sqlite3
+*.pyc
