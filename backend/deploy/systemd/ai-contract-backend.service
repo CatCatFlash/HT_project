@@ -1,0 +1,18 @@
+[Unit]
+Description=AI Contract Audit Backend
+After=network.target
+
+[Service]
+Type=simple
+User=chen
+Group=chen
+WorkingDirectory=/mnt/d/HT_project/HT_project/backend
+EnvironmentFile=/etc/ai-contract/backend.env
+ExecStart=/usr/bin/env python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8010
+Restart=always
+RestartSec=3
+TimeoutStartSec=60
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
