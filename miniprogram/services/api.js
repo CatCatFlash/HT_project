@@ -5,6 +5,7 @@ const UPLOAD_RETRY_LIMIT = 2;
 const UPLOAD_RETRY_DELAY_MS = 800;
 const INLINE_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
 const CHUNK_UPLOAD_SIZE = 16 * 1024;
+const BINARY_CHUNK_UPLOAD_SIZE = 8 * 1024;
 const MULTIPART_CHUNK_UPLOAD_SIZE = 64 * 1024;
 const CHUNK_UPLOAD_RETRY_LIMIT = 3;
 const CHUNK_UPLOAD_RETRY_DELAY_MS = 500;
@@ -53,7 +54,9 @@ function request({ url, method, data, header, timeout }) {
       url: `${getBaseURL()}${url}`,
       method,
       data,
-      header: getHeaders(header),
+      header: getHeaders(header, {
+        includeJsonContentType: !(header && header["Content-Type"]),
+      }),
       timeout: timeout || 120000,
       success: (response) => {
         try {
@@ -158,25 +161,34 @@ function uploadFileInline(filePath, fileName) {
           return;
         }
 
-        uploadInlineBase64(fileName, base64)
+        uploadFileInBinaryChunks(filePath, fileName)
           .then(resolve)
-          .catch((inlineError) => {
-            console.error("[api.uploadFileInline] inline fail, switching to chunk upload", {
+          .catch((binaryError) => {
+            console.error("[api.uploadFileInline] binary chunk fail, switching to inline upload", {
               filePath,
               fileName,
-              error: inlineError,
+              error: binaryError,
             });
-            uploadFileInMultipartChunks(filePath, fileName)
+            uploadInlineBase64(fileName, base64)
               .then(resolve)
-              .catch((multipartError) => {
-                console.error("[api.uploadFileInline] multipart chunk fail, switching to json chunk upload", {
+              .catch((inlineError) => {
+                console.error("[api.uploadFileInline] inline fail, switching to multipart chunk upload", {
                   filePath,
                   fileName,
-                  error: multipartError,
+                  error: inlineError,
                 });
-                uploadFileInChunks(fileName, base64)
+                uploadFileInMultipartChunks(filePath, fileName)
                   .then(resolve)
-                  .catch(reject);
+                  .catch((multipartError) => {
+                    console.error("[api.uploadFileInline] multipart chunk fail, switching to json chunk upload", {
+                      filePath,
+                      fileName,
+                      error: multipartError,
+                    });
+                    uploadFileInChunks(fileName, base64)
+                      .then(resolve)
+                      .catch(reject);
+                  });
               });
           });
       },
@@ -189,6 +201,129 @@ function uploadFileInline(filePath, fileName) {
         reject(classifyRequestFailure(error));
       },
     });
+  });
+}
+
+function uploadFileInBinaryChunks(filePath, fileName) {
+  return new Promise((resolve, reject) => {
+    wx.getFileSystemManager().getFileInfo({
+      filePath,
+      success: (info) => {
+        uploadFileInBinaryChunksBySize(filePath, fileName, info.size || 0).then(resolve).catch(reject);
+      },
+      fail: (error) => {
+        console.error("[api.uploadBinaryChunk] getFileInfo fail", {
+          filePath,
+          fileName,
+          error,
+        });
+        reject(classifyRequestFailure(error));
+      },
+    });
+  });
+}
+
+async function uploadFileInBinaryChunksBySize(filePath, fileName, fileSize) {
+  if (!fileSize) {
+    throw createBusinessError("文件内容为空，请重新选择文件。", "UPLOAD_EMPTY_FILE");
+  }
+
+  const uploadId = createUploadId();
+  const totalChunks = Math.ceil(fileSize / BINARY_CHUNK_UPLOAD_SIZE);
+
+  for (let index = 0; index < totalChunks; index += 1) {
+    const start = index * BINARY_CHUNK_UPLOAD_SIZE;
+    const length = Math.min(BINARY_CHUNK_UPLOAD_SIZE, fileSize - start);
+    const chunk = await readChunkArrayBuffer(filePath, index, start, length);
+    await uploadBinaryChunkWithRetry({
+      uploadId,
+      fileName,
+      chunkIndex: index,
+      totalChunks,
+      chunk,
+      attempt: 0,
+    });
+  }
+
+  return request({
+    url: "/api/v1/contracts/upload-chunk/complete",
+    method: "POST",
+    data: {
+      upload_id: uploadId,
+      file_name: fileName,
+      total_chunks: totalChunks,
+    },
+  }).then(mapUploadResponse);
+}
+
+function readChunkArrayBuffer(filePath, chunkIndex, position, length) {
+  return new Promise((resolve, reject) => {
+    wx.getFileSystemManager().readFile({
+      filePath,
+      position,
+      length,
+      success: (readResult) => {
+        resolve(readResult.data);
+      },
+      fail: (error) => {
+        console.error("[api.uploadBinaryChunk] read chunk fail", {
+          filePath,
+          chunkIndex,
+          position,
+          length,
+          error,
+        });
+        reject(classifyRequestFailure(error));
+      },
+    });
+  });
+}
+
+function uploadBinaryChunkWithRetry({ uploadId, fileName, chunkIndex, totalChunks, chunk, attempt }) {
+  return uploadBinaryChunk({
+    uploadId,
+    fileName,
+    chunkIndex,
+    totalChunks,
+    chunk,
+  }).catch((error) => {
+    if (!shouldRetryChunkUpload(error, attempt)) {
+      throw error;
+    }
+
+    console.warn("[api.uploadBinaryChunk] retry", {
+      fileName,
+      uploadId,
+      chunkIndex,
+      totalChunks,
+      attempt,
+      nextAttempt: attempt + 1,
+      type: error.type,
+      details: error.details,
+    });
+
+    return delay(CHUNK_UPLOAD_RETRY_DELAY_MS * (attempt + 1)).then(() =>
+      uploadBinaryChunkWithRetry({
+        uploadId,
+        fileName,
+        chunkIndex,
+        totalChunks,
+        chunk,
+        attempt: attempt + 1,
+      })
+    );
+  });
+}
+
+function uploadBinaryChunk({ uploadId, fileName, chunkIndex, totalChunks, chunk }) {
+  return request({
+    url: `/api/v1/contracts/upload-chunk-binary?upload_id=${encodeURIComponent(uploadId)}&file_name=${encodeURIComponent(fileName)}&chunk_index=${chunkIndex}&total_chunks=${totalChunks}`,
+    method: "POST",
+    timeout: 60000,
+    header: {
+      "Content-Type": "application/octet-stream",
+    },
+    data: chunk,
   });
 }
 

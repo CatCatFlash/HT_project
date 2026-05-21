@@ -3,7 +3,7 @@ import logging
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Request, UploadFile
 from pypdf import PdfReader
 
 from .. import database
@@ -240,6 +240,47 @@ async def upload_contract_chunk_file(
     (chunk_dir / f"{chunk_index:06d}.part").write_bytes(content)
     logger.info(
         "upload chunk file received user_id=%s upload_id=%s file_name=%s chunk_index=%s total_chunks=%s chunk_size=%s trace_id=%s phase=upload.chunk_file.received",
+        user_id,
+        safe_upload_id,
+        normalized_file_name,
+        chunk_index,
+        total_chunks,
+        len(content),
+        trace_id,
+    )
+    return {
+        "success": True,
+        "data": UploadChunkResponse(
+            upload_id=safe_upload_id,
+            chunk_index=chunk_index,
+            total_chunks=total_chunks,
+        ).model_dump(),
+    }
+
+
+@router.post("/upload-chunk-binary")
+async def upload_contract_chunk_binary(
+    upload_id: str,
+    file_name: str,
+    chunk_index: int,
+    total_chunks: int,
+    request: Request,
+    user_id: str = Depends(get_user_id),
+) -> dict:
+    trace_id = get_trace_id()
+    safe_upload_id = _safe_upload_id(upload_id)
+    normalized_file_name = (file_name or "").strip()
+    _validate_chunk_meta(normalized_file_name, chunk_index, total_chunks)
+
+    content = await request.body()
+    if not content:
+        raise UploadError("UPLOAD_EMPTY_FILE", "文件分片为空，请重新上传", 400, phase="upload.chunk_binary.read")
+
+    chunk_dir = _chunk_dir(user_id, safe_upload_id)
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    (chunk_dir / f"{chunk_index:06d}.part").write_bytes(content)
+    logger.info(
+        "upload chunk binary received user_id=%s upload_id=%s file_name=%s chunk_index=%s total_chunks=%s chunk_size=%s trace_id=%s phase=upload.chunk_binary.received",
         user_id,
         safe_upload_id,
         normalized_file_name,
