@@ -4,11 +4,12 @@ const { getOrCreateAnonymousUserId } = require("../utils/storage");
 const UPLOAD_RETRY_LIMIT = 2;
 const UPLOAD_RETRY_DELAY_MS = 800;
 const INLINE_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
-const CHUNK_UPLOAD_SIZE = 16 * 1024;
+const CHUNK_UPLOAD_SIZE = 4 * 1024;
 const BINARY_CHUNK_UPLOAD_SIZE = 8 * 1024;
 const MULTIPART_CHUNK_UPLOAD_SIZE = 64 * 1024;
 const CHUNK_UPLOAD_RETRY_LIMIT = 3;
 const CHUNK_UPLOAD_RETRY_DELAY_MS = 500;
+const CHUNK_UPLOAD_INTERVAL_MS = 120;
 
 function getBaseURL() {
   return getRuntimeEnv().baseURL;
@@ -161,31 +162,31 @@ function uploadFileInline(filePath, fileName) {
           return;
         }
 
-        uploadFileInBinaryChunks(filePath, fileName)
+        uploadFileInChunks(fileName, base64)
           .then(resolve)
-          .catch((binaryError) => {
-            console.error("[api.uploadFileInline] binary chunk fail, switching to inline upload", {
+          .catch((chunkError) => {
+            console.error("[api.uploadFileInline] json chunk fail, switching to binary chunk upload", {
               filePath,
               fileName,
-              error: binaryError,
+              error: chunkError,
             });
-            uploadInlineBase64(fileName, base64)
+            uploadFileInBinaryChunks(filePath, fileName)
               .then(resolve)
-              .catch((inlineError) => {
-                console.error("[api.uploadFileInline] inline fail, switching to multipart chunk upload", {
+              .catch((binaryError) => {
+                console.error("[api.uploadFileInline] binary chunk fail, switching to inline upload", {
                   filePath,
                   fileName,
-                  error: inlineError,
+                  error: binaryError,
                 });
-                uploadFileInMultipartChunks(filePath, fileName)
+                uploadInlineBase64(fileName, base64)
                   .then(resolve)
-                  .catch((multipartError) => {
-                    console.error("[api.uploadFileInline] multipart chunk fail, switching to json chunk upload", {
+                  .catch((inlineError) => {
+                    console.error("[api.uploadFileInline] inline fail, switching to multipart chunk upload", {
                       filePath,
                       fileName,
-                      error: multipartError,
+                      error: inlineError,
                     });
-                    uploadFileInChunks(fileName, base64)
+                    uploadFileInMultipartChunks(filePath, fileName)
                       .then(resolve)
                       .catch(reject);
                   });
@@ -520,6 +521,7 @@ async function uploadFileInChunks(fileName, base64) {
       chunk,
       attempt: 0,
     });
+    await delay(CHUNK_UPLOAD_INTERVAL_MS);
   }
 
   return request({
