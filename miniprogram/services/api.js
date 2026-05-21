@@ -4,7 +4,9 @@ const { getOrCreateAnonymousUserId } = require("../utils/storage");
 const UPLOAD_RETRY_LIMIT = 2;
 const UPLOAD_RETRY_DELAY_MS = 800;
 const INLINE_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
-const CHUNK_UPLOAD_SIZE = 96 * 1024;
+const CHUNK_UPLOAD_SIZE = 16 * 1024;
+const CHUNK_UPLOAD_RETRY_LIMIT = 3;
+const CHUNK_UPLOAD_RETRY_DELAY_MS = 500;
 
 function getBaseURL() {
   return getRuntimeEnv().baseURL;
@@ -44,13 +46,14 @@ function unwrapResponse(response) {
   return data.data;
 }
 
-function request({ url, method, data, header }) {
+function request({ url, method, data, header, timeout }) {
   return new Promise((resolve, reject) => {
     wx.request({
       url: `${getBaseURL()}${url}`,
       method,
       data,
       header: getHeaders(header),
+      timeout: timeout || 120000,
       success: (response) => {
         try {
           resolve(unwrapResponse(response));
@@ -59,10 +62,12 @@ function request({ url, method, data, header }) {
         }
       },
       fail: (error) => {
+        const debugInfo = extractClientErrorInfo(error);
         console.error("[api.request] fail", {
           url: `${getBaseURL()}${url}`,
           method,
           error,
+          debugInfo,
         });
         reject(classifyRequestFailure(error));
       },
@@ -195,16 +200,13 @@ async function uploadFileInChunks(fileName, base64) {
   for (let index = 0; index < totalChunks; index += 1) {
     const start = index * CHUNK_UPLOAD_SIZE;
     const chunk = base64.slice(start, start + CHUNK_UPLOAD_SIZE);
-    await request({
-      url: "/api/v1/contracts/upload-chunk",
-      method: "POST",
-      data: {
-        upload_id: uploadId,
-        file_name: fileName,
-        chunk_index: index,
-        total_chunks: totalChunks,
-        chunk_base64: chunk,
-      },
+    await uploadChunkWithRetry({
+      uploadId,
+      fileName,
+      chunkIndex: index,
+      totalChunks,
+      chunk,
+      attempt: 0,
     });
   }
 
@@ -217,6 +219,47 @@ async function uploadFileInChunks(fileName, base64) {
       total_chunks: totalChunks,
     },
   }).then(mapUploadResponse);
+}
+
+function uploadChunkWithRetry({ uploadId, fileName, chunkIndex, totalChunks, chunk, attempt }) {
+  return request({
+    url: "/api/v1/contracts/upload-chunk",
+    method: "POST",
+    timeout: 60000,
+    data: {
+      upload_id: uploadId,
+      file_name: fileName,
+      chunk_index: chunkIndex,
+      total_chunks: totalChunks,
+      chunk_base64: chunk,
+    },
+  }).catch((error) => {
+    if (!shouldRetryChunkUpload(error, attempt)) {
+      throw error;
+    }
+
+    console.warn("[api.uploadChunk] retry", {
+      fileName,
+      uploadId,
+      chunkIndex,
+      totalChunks,
+      attempt,
+      nextAttempt: attempt + 1,
+      type: error.type,
+      details: error.details,
+    });
+
+    return delay(CHUNK_UPLOAD_RETRY_DELAY_MS * (attempt + 1)).then(() =>
+      uploadChunkWithRetry({
+        uploadId,
+        fileName,
+        chunkIndex,
+        totalChunks,
+        chunk,
+        attempt: attempt + 1,
+      })
+    );
+  });
 }
 
 function createUploadId() {
@@ -355,6 +398,31 @@ function shouldRetryUpload(error, attempt) {
   ].some((keyword) => details.includes(keyword));
 }
 
+function shouldRetryChunkUpload(error, attempt) {
+  if (!error || attempt >= CHUNK_UPLOAD_RETRY_LIMIT) {
+    return false;
+  }
+
+  if (error.type === "network-timeout") {
+    return true;
+  }
+
+  if (error.type !== "network") {
+    return false;
+  }
+
+  const details = normalizeText(error.details).toLowerCase();
+  return [
+    "err_connection_reset",
+    "connection reset",
+    "errcode:-101",
+    "cronet_error_code:-101",
+    "600001",
+    "software caused connection abort",
+    "request:fail",
+  ].some((keyword) => details.includes(keyword));
+}
+
 function isDomainOrHttpsFailure(errMsg) {
   return [
     "url not in domain list",
@@ -378,6 +446,11 @@ function isConnectionFailure(errMsg) {
     "fail connect",
     "unable to resolve host",
     "network",
+    "err_connection_reset",
+    "connection reset",
+    "errcode:-101",
+    "cronet_error_code:-101",
+    "600001",
   ].some((keyword) => errMsg.includes(keyword));
 }
 
