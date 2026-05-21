@@ -4,6 +4,7 @@ const { getOrCreateAnonymousUserId } = require("../utils/storage");
 const UPLOAD_RETRY_LIMIT = 2;
 const UPLOAD_RETRY_DELAY_MS = 800;
 const INLINE_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
+const CHUNK_UPLOAD_SIZE = 96 * 1024;
 
 function getBaseURL() {
   return getRuntimeEnv().baseURL;
@@ -151,17 +152,18 @@ function uploadFileInline(filePath, fileName) {
           return;
         }
 
-        request({
-          url: "/api/v1/contracts/upload-inline",
-          method: "POST",
-          data: {
-            file_name: fileName,
-            file_content_base64: base64,
-          },
-        })
-          .then(mapUploadResponse)
+        uploadInlineBase64(fileName, base64)
           .then(resolve)
-          .catch(reject);
+          .catch((inlineError) => {
+            console.error("[api.uploadFileInline] inline fail, switching to chunk upload", {
+              filePath,
+              fileName,
+              error: inlineError,
+            });
+            uploadFileInChunks(fileName, base64)
+              .then(resolve)
+              .catch(reject);
+          });
       },
       fail: (error) => {
         console.error("[api.uploadFileInline] read fail", {
@@ -173,6 +175,52 @@ function uploadFileInline(filePath, fileName) {
       },
     });
   });
+}
+
+function uploadInlineBase64(fileName, base64) {
+  return request({
+    url: "/api/v1/contracts/upload-inline",
+    method: "POST",
+    data: {
+      file_name: fileName,
+      file_content_base64: base64,
+    },
+  }).then(mapUploadResponse);
+}
+
+async function uploadFileInChunks(fileName, base64) {
+  const uploadId = createUploadId();
+  const totalChunks = Math.ceil(base64.length / CHUNK_UPLOAD_SIZE);
+
+  for (let index = 0; index < totalChunks; index += 1) {
+    const start = index * CHUNK_UPLOAD_SIZE;
+    const chunk = base64.slice(start, start + CHUNK_UPLOAD_SIZE);
+    await request({
+      url: "/api/v1/contracts/upload-chunk",
+      method: "POST",
+      data: {
+        upload_id: uploadId,
+        file_name: fileName,
+        chunk_index: index,
+        total_chunks: totalChunks,
+        chunk_base64: chunk,
+      },
+    });
+  }
+
+  return request({
+    url: "/api/v1/contracts/upload-chunk/complete",
+    method: "POST",
+    data: {
+      upload_id: uploadId,
+      file_name: fileName,
+      total_chunks: totalChunks,
+    },
+  }).then(mapUploadResponse);
+}
+
+function createUploadId() {
+  return `wx_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
 function submitText(text) {

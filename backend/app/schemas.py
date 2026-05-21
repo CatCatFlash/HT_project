@@ -47,6 +47,27 @@ class UploadInlineRequest(BaseModel):
     file_content_base64: str = Field(..., min_length=1)
 
 
+class UploadChunkRequest(BaseModel):
+    upload_id: str = Field(..., min_length=8, max_length=80)
+    file_name: str = Field(..., min_length=1, max_length=255)
+    chunk_index: int = Field(..., ge=0)
+    total_chunks: int = Field(..., ge=1, le=500)
+    chunk_base64: str = Field(..., min_length=1)
+
+
+class UploadChunkResponse(BaseModel):
+    upload_id: str
+    chunk_index: int
+    total_chunks: int
+    received: bool = True
+
+
+class CompleteChunkUploadRequest(BaseModel):
+    upload_id: str = Field(..., min_length=8, max_length=80)
+    file_name: str = Field(..., min_length=1, max_length=255)
+    total_chunks: int = Field(..., ge=1, le=500)
+
+
 class UploadResponse(BaseModel):
     task_id: str
     file_id: str

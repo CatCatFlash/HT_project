@@ -21,12 +21,15 @@ from ..models import (
 )
 from ..schemas import (
     AuditResultResponse,
+    CompleteChunkUploadRequest,
     DeleteResponse,
     HistoryItem,
     PreviewResponse,
     StartAuditResponse,
     TextSubmitRequest,
     TextSubmitResponse,
+    UploadChunkRequest,
+    UploadChunkResponse,
     UploadInlineRequest,
     UploadResponse,
 )
@@ -38,6 +41,8 @@ from ..trace import get_trace_id
 router = APIRouter(prefix="/api/v1/contracts", tags=["contracts"])
 audit_service = AuditService()
 logger = logging.getLogger(__name__)
+CHUNK_UPLOAD_DIR = Path(__file__).resolve().parent.parent / "data" / "upload_chunks"
+CHUNK_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _status_text(status: str) -> str:
@@ -210,6 +215,92 @@ async def upload_contract_inline(
             exc.code,
         )
         raise
+
+
+@router.post("/upload-chunk")
+async def upload_contract_chunk(
+    request: UploadChunkRequest,
+    user_id: str = Depends(get_user_id),
+) -> dict:
+    trace_id = get_trace_id()
+    upload_id = _safe_upload_id(request.upload_id)
+    file_name = (request.file_name or "").strip()
+    _validate_chunk_meta(file_name, request.chunk_index, request.total_chunks)
+
+    try:
+        chunk = base64.b64decode(request.chunk_base64, validate=True)
+    except Exception as exc:
+        logger.warning(
+            "upload chunk decode failed user_id=%s upload_id=%s file_name=%s chunk_index=%s trace_id=%s phase=upload.chunk.decode",
+            user_id,
+            upload_id,
+            file_name,
+            request.chunk_index,
+            trace_id,
+        )
+        raise UploadError("UPLOAD_INVALID_CONTENT", "文件分片内容无法识别，请重新上传", 400, phase="upload.chunk.decode") from exc
+
+    chunk_dir = _chunk_dir(user_id, upload_id)
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    (chunk_dir / f"{request.chunk_index:06d}.part").write_bytes(chunk)
+    logger.info(
+        "upload chunk received user_id=%s upload_id=%s file_name=%s chunk_index=%s total_chunks=%s chunk_size=%s trace_id=%s phase=upload.chunk.received",
+        user_id,
+        upload_id,
+        file_name,
+        request.chunk_index,
+        request.total_chunks,
+        len(chunk),
+        trace_id,
+    )
+    return {
+        "success": True,
+        "data": UploadChunkResponse(
+            upload_id=upload_id,
+            chunk_index=request.chunk_index,
+            total_chunks=request.total_chunks,
+        ).model_dump(),
+    }
+
+
+@router.post("/upload-chunk/complete")
+async def complete_contract_chunk_upload(
+    request: CompleteChunkUploadRequest,
+    background_tasks: BackgroundTasks,
+    user_id: str = Depends(get_user_id),
+) -> dict:
+    trace_id = get_trace_id()
+    upload_id = _safe_upload_id(request.upload_id)
+    file_name = (request.file_name or "").strip()
+    _validate_chunk_meta(file_name, 0, request.total_chunks)
+
+    chunk_dir = _chunk_dir(user_id, upload_id)
+    chunks: list[bytes] = []
+    try:
+        for index in range(request.total_chunks):
+            chunk_path = chunk_dir / f"{index:06d}.part"
+            if not chunk_path.exists():
+                raise UploadError("UPLOAD_CHUNK_MISSING", "文件分片缺失，请重新上传", 400, phase="upload.chunk.complete")
+            chunks.append(chunk_path.read_bytes())
+        content = b"".join(chunks)
+        logger.info(
+            "upload chunk completed user_id=%s upload_id=%s file_name=%s file_size=%s total_chunks=%s trace_id=%s phase=upload.chunk.completed",
+            user_id,
+            upload_id,
+            file_name,
+            len(content),
+            request.total_chunks,
+            trace_id,
+        )
+        return _create_upload_task(
+            background_tasks=background_tasks,
+            user_id=user_id,
+            file_name=file_name,
+            content=content,
+            trace_id=trace_id,
+        )
+    finally:
+        _cleanup_chunk_dir(chunk_dir)
 
 
 @router.post("/text")
@@ -477,3 +568,33 @@ def _read_pdf_page_count(file_url: str | None) -> int | None:
         return len(reader.pages)
     except Exception:
         return None
+
+
+def _safe_upload_id(upload_id: str) -> str:
+    safe = "".join(char for char in upload_id.strip() if char.isalnum() or char in {"-", "_"})
+    if len(safe) < 8:
+        raise UploadError("UPLOAD_INVALID_REQUEST", "上传请求异常，请重新选择文件后再试", 400, phase="upload.chunk.validate")
+    return safe[:80]
+
+
+def _validate_chunk_meta(file_name: str, chunk_index: int, total_chunks: int) -> None:
+    validate_upload(type("UploadFileLike", (), {"filename": file_name})(), 1)
+    if chunk_index >= total_chunks:
+        raise UploadError("UPLOAD_INVALID_REQUEST", "上传分片序号异常，请重新上传", 400, phase="upload.chunk.validate")
+
+
+def _chunk_dir(user_id: str, upload_id: str) -> Path:
+    user_key = "".join(char for char in user_id if char.isalnum() or char in {"-", "_"})[:80] or "anonymous"
+    return CHUNK_UPLOAD_DIR / user_key / upload_id
+
+
+def _cleanup_chunk_dir(chunk_dir: Path) -> None:
+    try:
+        if not chunk_dir.exists():
+            return
+        for child in chunk_dir.iterdir():
+            if child.is_file():
+                child.unlink()
+        chunk_dir.rmdir()
+    except Exception:
+        logger.warning("upload chunk cleanup failed path=%s", chunk_dir)
