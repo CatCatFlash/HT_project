@@ -5,6 +5,7 @@ const UPLOAD_RETRY_LIMIT = 2;
 const UPLOAD_RETRY_DELAY_MS = 800;
 const INLINE_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
 const CHUNK_UPLOAD_SIZE = 16 * 1024;
+const MULTIPART_CHUNK_UPLOAD_SIZE = 64 * 1024;
 const CHUNK_UPLOAD_RETRY_LIMIT = 3;
 const CHUNK_UPLOAD_RETRY_DELAY_MS = 500;
 
@@ -165,9 +166,18 @@ function uploadFileInline(filePath, fileName) {
               fileName,
               error: inlineError,
             });
-            uploadFileInChunks(fileName, base64)
+            uploadFileInMultipartChunks(filePath, fileName)
               .then(resolve)
-              .catch(reject);
+              .catch((multipartError) => {
+                console.error("[api.uploadFileInline] multipart chunk fail, switching to json chunk upload", {
+                  filePath,
+                  fileName,
+                  error: multipartError,
+                });
+                uploadFileInChunks(fileName, base64)
+                  .then(resolve)
+                  .catch(reject);
+              });
           });
       },
       fail: (error) => {
@@ -177,6 +187,173 @@ function uploadFileInline(filePath, fileName) {
           error,
         });
         reject(classifyRequestFailure(error));
+      },
+    });
+  });
+}
+
+function uploadFileInMultipartChunks(filePath, fileName) {
+  return new Promise((resolve, reject) => {
+    wx.getFileSystemManager().getFileInfo({
+      filePath,
+      success: (info) => {
+        uploadFileInMultipartChunksBySize(filePath, fileName, info.size || 0).then(resolve).catch(reject);
+      },
+      fail: (error) => {
+        console.error("[api.uploadMultipartChunk] getFileInfo fail", {
+          filePath,
+          fileName,
+          error,
+        });
+        reject(classifyRequestFailure(error));
+      },
+    });
+  });
+}
+
+async function uploadFileInMultipartChunksBySize(filePath, fileName, fileSize) {
+  if (!fileSize) {
+    throw createBusinessError("文件内容为空，请重新选择文件。", "UPLOAD_EMPTY_FILE");
+  }
+
+  const uploadId = createUploadId();
+  const totalChunks = Math.ceil(fileSize / MULTIPART_CHUNK_UPLOAD_SIZE);
+
+  for (let index = 0; index < totalChunks; index += 1) {
+    const start = index * MULTIPART_CHUNK_UPLOAD_SIZE;
+    const length = Math.min(MULTIPART_CHUNK_UPLOAD_SIZE, fileSize - start);
+    const chunkPath = await writeMultipartChunkTempFile(filePath, uploadId, index, start, length);
+    try {
+      await uploadMultipartChunkWithRetry({
+        uploadId,
+        fileName,
+        chunkIndex: index,
+        totalChunks,
+        chunkPath,
+        attempt: 0,
+      });
+    } finally {
+      removeTempChunkFile(chunkPath);
+    }
+  }
+
+  return request({
+    url: "/api/v1/contracts/upload-chunk/complete",
+    method: "POST",
+    data: {
+      upload_id: uploadId,
+      file_name: fileName,
+      total_chunks: totalChunks,
+    },
+  }).then(mapUploadResponse);
+}
+
+function writeMultipartChunkTempFile(filePath, uploadId, chunkIndex, position, length) {
+  return new Promise((resolve, reject) => {
+    const fs = wx.getFileSystemManager();
+    fs.readFile({
+      filePath,
+      position,
+      length,
+      success: (readResult) => {
+        const chunkPath = `${wx.env.USER_DATA_PATH}/${uploadId}_${chunkIndex}.part`;
+        fs.writeFile({
+          filePath: chunkPath,
+          data: readResult.data,
+          success: () => resolve(chunkPath),
+          fail: (error) => {
+            console.error("[api.uploadMultipartChunk] write temp fail", {
+              filePath,
+              chunkPath,
+              chunkIndex,
+              error,
+            });
+            reject(classifyRequestFailure(error));
+          },
+        });
+      },
+      fail: (error) => {
+        console.error("[api.uploadMultipartChunk] read chunk fail", {
+          filePath,
+          chunkIndex,
+          position,
+          length,
+          error,
+        });
+        reject(classifyRequestFailure(error));
+      },
+    });
+  });
+}
+
+function uploadMultipartChunkWithRetry({ uploadId, fileName, chunkIndex, totalChunks, chunkPath, attempt }) {
+  return uploadMultipartChunk({
+    uploadId,
+    fileName,
+    chunkIndex,
+    totalChunks,
+    chunkPath,
+  }).catch((error) => {
+    if (!shouldRetryChunkUpload(error, attempt)) {
+      throw error;
+    }
+
+    console.warn("[api.uploadMultipartChunk] retry", {
+      fileName,
+      uploadId,
+      chunkIndex,
+      totalChunks,
+      attempt,
+      nextAttempt: attempt + 1,
+      type: error.type,
+      details: error.details,
+    });
+
+    return delay(CHUNK_UPLOAD_RETRY_DELAY_MS * (attempt + 1)).then(() =>
+      uploadMultipartChunkWithRetry({
+        uploadId,
+        fileName,
+        chunkIndex,
+        totalChunks,
+        chunkPath,
+        attempt: attempt + 1,
+      })
+    );
+  });
+}
+
+function uploadMultipartChunk({ uploadId, fileName, chunkIndex, totalChunks, chunkPath }) {
+  return new Promise((resolve, reject) => {
+    wx.uploadFile({
+      url: `${getBaseURL()}/api/v1/contracts/upload-chunk-file?upload_id=${encodeURIComponent(uploadId)}&file_name=${encodeURIComponent(fileName)}&chunk_index=${chunkIndex}&total_chunks=${totalChunks}`,
+      filePath: chunkPath,
+      name: "chunk",
+      header: getHeaders({}, { includeJsonContentType: false }),
+      timeout: 60000,
+      success: (response) => {
+        try {
+          const parsed = typeof response.data === "string" ? JSON.parse(response.data) : response.data;
+          const data = unwrapResponse({
+            statusCode: response.statusCode,
+            data: parsed,
+          });
+          resolve(data);
+        } catch (error) {
+          reject(error);
+        }
+      },
+      fail: (error) => {
+        const debugInfo = extractClientErrorInfo(error);
+        console.error("[api.uploadMultipartChunk] fail", {
+          uploadId,
+          fileName,
+          chunkIndex,
+          totalChunks,
+          chunkPath,
+          error,
+          debugInfo,
+        });
+        reject(classifyUploadFailure(error));
       },
     });
   });
@@ -264,6 +441,17 @@ function uploadChunkWithRetry({ uploadId, fileName, chunkIndex, totalChunks, chu
 
 function createUploadId() {
   return `wx_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+function removeTempChunkFile(chunkPath) {
+  if (!chunkPath) {
+    return;
+  }
+
+  wx.getFileSystemManager().unlink({
+    filePath: chunkPath,
+    fail: () => {},
+  });
 }
 
 function submitText(text) {
