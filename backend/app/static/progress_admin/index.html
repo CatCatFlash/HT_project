@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>项目进度管理后台</title>
+    <style>
+      :root {
+        --bg: #f4efe6;
+        --surface: rgba(255, 251, 243, 0.82);
+        --panel: rgba(255, 255, 255, 0.7);
+        --line: rgba(38, 54, 44, 0.12);
+        --ink: #1f2c23;
+        --muted: #657165;
+        --green: #234b36;
+        --green-soft: rgba(35, 75, 54, 0.12);
+        --amber: #8b5a11;
+        --amber-soft: rgba(211, 145, 48, 0.16);
+        --red: #9f3324;
+        --red-soft: rgba(196, 74, 54, 0.14);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top right, rgba(198, 226, 203, 0.6), transparent 25%),
+          linear-gradient(180deg, #f8f4eb 0%, #f3eee4 100%);
+      }
+
+      .shell {
+        min-height: 100vh;
+        padding: 28px;
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: 1.2fr 0.9fr;
+        gap: 24px;
+      }
+
+      .panel {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 28px;
+        box-shadow: 0 22px 70px rgba(51, 67, 55, 0.08);
+        backdrop-filter: blur(16px);
+      }
+
+      .hero {
+        padding: 28px;
+        background:
+          radial-gradient(circle at top right, rgba(210, 231, 214, 0.9), transparent 28%),
+          linear-gradient(145deg, rgba(255, 251, 243, 0.98), rgba(236, 244, 238, 0.92));
+      }
+
+      .hero-top {
+        display: flex;
+        justify-content: space-between;
+        gap: 24px;
+        align-items: flex-start;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        padding: 8px 14px;
+        border-radius: 999px;
+        background: var(--green-soft);
+        color: var(--green);
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        margin: 16px 0 10px;
+        font-size: 38px;
+        line-height: 1.05;
+      }
+
+      .subtitle {
+        max-width: 720px;
+        color: var(--muted);
+        font-size: 15px;
+        line-height: 1.7;
+      }
+
+      .hero-metric {
+        min-width: 170px;
+        padding: 18px 20px;
+        border-radius: 22px;
+        background: rgba(31, 61, 46, 0.94);
+        color: #f6f0e3;
+        text-align: center;
+      }
+
+      .hero-metric strong {
+        display: block;
+        font-size: 42px;
+        line-height: 1;
+      }
+
+      .hero-metric span {
+        display: block;
+        margin-top: 8px;
+        font-size: 12px;
+        color: rgba(246, 240, 227, 0.74);
+      }
+
+      .summary-grid {
+        margin-top: 24px;
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .summary-box {
+        padding: 18px;
+        border-radius: 20px;
+        background: rgba(255, 255, 255, 0.68);
+        border: 1px solid rgba(41, 59, 47, 0.08);
+      }
+
+      .summary-box strong {
+        display: block;
+        font-size: 34px;
+      }
+
+      .summary-box span {
+        display: block;
+        margin-top: 8px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      .dialog-grid {
+        margin-top: 20px;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+      }
+
+      .dialog-card {
+        padding: 20px;
+        border-radius: 24px;
+        background: var(--panel);
+        border: 1px solid transparent;
+        cursor: pointer;
+        transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+      }
+
+      .dialog-card:hover,
+      .dialog-card.active {
+        transform: translateY(-3px);
+        border-color: rgba(35, 75, 54, 0.24);
+        box-shadow: 0 18px 44px rgba(46, 66, 54, 0.1);
+      }
+
+      .card-top {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: center;
+      }
+
+      .card-title {
+        font-size: 19px;
+        font-weight: 700;
+      }
+
+      .chip {
+        padding: 7px 12px;
+        border-radius: 999px;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+
+      .chip.on-track {
+        color: var(--green);
+        background: var(--green-soft);
+      }
+
+      .chip.attention {
+        color: var(--amber);
+        background: var(--amber-soft);
+      }
+
+      .chip.risk {
+        color: var(--red);
+        background: var(--red-soft);
+      }
+
+      .progress-row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 12px;
+        align-items: center;
+        margin-top: 18px;
+      }
+
+      .track {
+        height: 12px;
+        border-radius: 999px;
+        background: rgba(89, 109, 94, 0.14);
+        overflow: hidden;
+      }
+
+      .fill {
+        height: 100%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, #234b36 0%, #5d8b6d 100%);
+      }
+
+      .summary {
+        margin-top: 16px;
+        min-height: 70px;
+        color: #546154;
+        font-size: 14px;
+        line-height: 1.7;
+      }
+
+      .meta {
+        margin-top: 16px;
+        display: grid;
+        gap: 6px;
+        color: #768175;
+        font-size: 12px;
+      }
+
+      .editor {
+        padding: 24px;
+        display: grid;
+        gap: 18px;
+        align-content: start;
+      }
+
+      .editor-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: flex-start;
+      }
+
+      .editor-head h2 {
+        margin: 0;
+        font-size: 28px;
+      }
+
+      .stamp {
+        color: var(--muted);
+        font-size: 12px;
+        margin-top: 8px;
+      }
+
+      .field-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .field,
+      .field-wide {
+        display: grid;
+        gap: 8px;
+      }
+
+      .field-wide {
+        grid-column: 1 / -1;
+      }
+
+      label {
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      input,
+      select,
+      textarea {
+        width: 100%;
+        border: 1px solid rgba(57, 74, 60, 0.14);
+        border-radius: 16px;
+        background: rgba(255, 255, 255, 0.78);
+        padding: 12px 14px;
+        font: inherit;
+        color: var(--ink);
+        outline: none;
+      }
+
+      input:focus,
+      select:focus,
+      textarea:focus {
+        border-color: rgba(35, 75, 54, 0.34);
+        box-shadow: 0 0 0 4px rgba(35, 75, 54, 0.08);
+      }
+
+      textarea {
+        min-height: 94px;
+        resize: vertical;
+        line-height: 1.6;
+      }
+
+      .actions {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: center;
+      }
+
+      .hint {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      button {
+        border: 0;
+        border-radius: 999px;
+        padding: 13px 20px;
+        background: var(--green);
+        color: #f8f3e7;
+        font: inherit;
+        cursor: pointer;
+      }
+
+      button:disabled {
+        opacity: 0.6;
+        cursor: wait;
+      }
+
+      .toast {
+        min-height: 20px;
+        font-size: 13px;
+      }
+
+      .toast.success {
+        color: #1d6a57;
+      }
+
+      .toast.error {
+        color: #9f3324;
+      }
+
+      @media (max-width: 1080px) {
+        .layout {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 720px) {
+        .shell {
+          padding: 16px;
+        }
+
+        .hero-top,
+        .editor-head,
+        .actions {
+          grid-template-columns: 1fr;
+          display: grid;
+        }
+
+        .dialog-grid,
+        .field-grid,
+        .summary-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <div class="layout">
+        <section>
+          <div class="panel hero">
+            <div class="hero-top">
+              <div>
+                <div class="eyebrow">Progress Console</div>
+                <h1>几个对话窗口的工作进度</h1>
+                <div class="subtitle">
+                  这里是独立后台，不依赖小程序页面。你可以统一查看六个窗口的进度状态，并在右侧直接更新负责人、阻塞项和下一步动作。
+                </div>
+              </div>
+              <div class="hero-metric">
+                <strong id="overallCompletion">0%</strong>
+                <span>整体推进度</span>
+              </div>
+            </div>
+
+            <div class="summary-grid">
+              <div class="summary-box">
+                <strong id="healthyCount">0</strong>
+                <span>按计划推进</span>
+              </div>
+              <div class="summary-box">
+                <strong id="attentionCount">0</strong>
+                <span>需要关注</span>
+              </div>
+              <div class="summary-box">
+                <strong id="riskCount">0</strong>
+                <span>存在风险</span>
+              </div>
+            </div>
+
+            <div class="dialog-grid" id="dialogGrid"></div>
+          </div>
+        </section>
+
+        <aside class="panel editor">
+          <div class="editor-head">
+            <div>
+              <h2 id="editorTitle">选择窗口</h2>
+              <div class="stamp" id="updatedAt">最近更新 -</div>
+            </div>
+            <div class="chip on-track" id="editorStatusChip">按计划</div>
+          </div>
+
+          <form id="editorForm">
+            <div class="field-grid">
+              <div class="field">
+                <label for="owner">负责人</label>
+                <input id="owner" name="owner" required />
+              </div>
+              <div class="field">
+                <label for="dueLabel">预计节点</label>
+                <input id="dueLabel" name="dueLabel" required />
+              </div>
+
+              <div class="field">
+                <label for="progress">进度百分比</label>
+                <input id="progress" name="progress" type="number" min="0" max="100" required />
+              </div>
+              <div class="field">
+                <label for="status">状态</label>
+                <select id="status" name="status">
+                  <option value="on-track">按计划</option>
+                  <option value="attention">需关注</option>
+                  <option value="risk">有风险</option>
+                </select>
+              </div>
+
+              <div class="field-wide">
+                <label for="phase">当前阶段</label>
+                <input id="phase" name="phase" required />
+              </div>
+
+              <div class="field-wide">
+                <label for="summary">进度说明</label>
+                <textarea id="summary" name="summary" required></textarea>
+              </div>
+
+              <div class="field-wide">
+                <label for="blockers">当前阻塞</label>
+                <textarea id="blockers" name="blockers" required></textarea>
+              </div>
+
+              <div class="field-wide">
+                <label for="nextStep">下一步动作</label>
+                <textarea id="nextStep" name="nextStep" required></textarea>
+              </div>
+            </div>
+
+            <div class="actions">
+              <div>
+                <div class="hint">修改后会立即保存到后台数据库。</div>
+                <div class="toast" id="toast"></div>
+              </div>
+              <button id="saveButton" type="submit">保存当前窗口</button>
+            </div>
+          </form>
+        </aside>
+      </div>
+    </div>
+
+    <script>
+      const state = {
+        items: [],
+        activeId: null,
+      };
+
+      const statusTextMap = {
+        "on-track": "按计划",
+        attention: "需关注",
+        risk: "有风险",
+      };
+
+      const els = {
+        overallCompletion: document.getElementById("overallCompletion"),
+        healthyCount: document.getElementById("healthyCount"),
+        attentionCount: document.getElementById("attentionCount"),
+        riskCount: document.getElementById("riskCount"),
+        dialogGrid: document.getElementById("dialogGrid"),
+        editorTitle: document.getElementById("editorTitle"),
+        updatedAt: document.getElementById("updatedAt"),
+        editorStatusChip: document.getElementById("editorStatusChip"),
+        toast: document.getElementById("toast"),
+        saveButton: document.getElementById("saveButton"),
+        form: document.getElementById("editorForm"),
+        owner: document.getElementById("owner"),
+        dueLabel: document.getElementById("dueLabel"),
+        progress: document.getElementById("progress"),
+        status: document.getElementById("status"),
+        phase: document.getElementById("phase"),
+        summary: document.getElementById("summary"),
+        blockers: document.getElementById("blockers"),
+        nextStep: document.getElementById("nextStep"),
+      };
+
+      function formatTime(value) {
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return "-";
+        return date.toLocaleString("zh-CN", { hour12: false });
+      }
+
+      function setToast(message, type = "") {
+        els.toast.textContent = message;
+        els.toast.className = `toast ${type}`.trim();
+      }
+
+      function renderOverview(overview) {
+        els.overallCompletion.textContent = `${overview.completion}%`;
+        els.healthyCount.textContent = overview.healthy_count;
+        els.attentionCount.textContent = overview.attention_count;
+        els.riskCount.textContent = overview.risk_count;
+      }
+
+      function renderDialogs() {
+        els.dialogGrid.innerHTML = "";
+        state.items.forEach((item) => {
+          const card = document.createElement("button");
+          card.type = "button";
+          card.className = `dialog-card ${item.id === state.activeId ? "active" : ""}`;
+          card.innerHTML = `
+            <div class="card-top">
+              <div class="card-title">${item.name}</div>
+              <div class="chip ${item.status}">${statusTextMap[item.status]}</div>
+            </div>
+            <div class="progress-row">
+              <div class="track"><div class="fill" style="width: ${item.progress}%"></div></div>
+              <div>${item.progress}%</div>
+            </div>
+            <div class="summary">${item.summary}</div>
+            <div class="meta">
+              <div>负责人 · ${item.owner}</div>
+              <div>阶段 · ${item.phase}</div>
+              <div>节点 · ${item.due_label}</div>
+            </div>
+          `;
+          card.addEventListener("click", () => {
+            state.activeId = item.id;
+            renderDialogs();
+            fillEditor();
+            setToast("");
+          });
+          els.dialogGrid.appendChild(card);
+        });
+      }
+
+      function fillEditor() {
+        const active = state.items.find((item) => item.id === state.activeId);
+        if (!active) return;
+        els.editorTitle.textContent = active.name;
+        els.updatedAt.textContent = `最近更新 ${formatTime(active.updated_at)}`;
+        els.editorStatusChip.textContent = statusTextMap[active.status];
+        els.editorStatusChip.className = `chip ${active.status}`;
+        els.owner.value = active.owner;
+        els.dueLabel.value = active.due_label;
+        els.progress.value = active.progress;
+        els.status.value = active.status;
+        els.phase.value = active.phase;
+        els.summary.value = active.summary;
+        els.blockers.value = active.blockers;
+        els.nextStep.value = active.next_step;
+      }
+
+      async function loadDashboard() {
+        const response = await fetch("/api/v1/progress/dialogs");
+        const payload = await response.json();
+        if (!payload.success) {
+          throw new Error(payload.error?.message || "加载失败");
+        }
+        state.items = payload.data.items;
+        state.activeId = state.activeId || state.items[0]?.id || null;
+        renderOverview(payload.data.overview);
+        renderDialogs();
+        fillEditor();
+      }
+
+      async function saveActiveDialog(event) {
+        event.preventDefault();
+        const active = state.items.find((item) => item.id === state.activeId);
+        if (!active) return;
+
+        const body = {
+          owner: els.owner.value.trim(),
+          due_label: els.dueLabel.value.trim(),
+          progress: Number(els.progress.value),
+          status: els.status.value,
+          phase: els.phase.value.trim(),
+          summary: els.summary.value.trim(),
+          blockers: els.blockers.value.trim(),
+          next_step: els.nextStep.value.trim(),
+        };
+
+        els.saveButton.disabled = true;
+        setToast("正在保存...", "");
+
+        try {
+          const response = await fetch(`/api/v1/progress/dialogs/${active.id}`, {
+            method: "PUT",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(body),
+          });
+          const payload = await response.json();
+          if (!payload.success) {
+            throw new Error(payload.error?.message || "保存失败");
+          }
+          await loadDashboard();
+          setToast("保存成功，后台数据已更新。", "success");
+        } catch (error) {
+          setToast(error.message || "保存失败，请稍后重试。", "error");
+        } finally {
+          els.saveButton.disabled = false;
+        }
+      }
+
+      els.form.addEventListener("submit", saveActiveDialog);
+      loadDashboard().catch((error) => {
+        setToast(error.message || "加载失败，请刷新重试。", "error");
+      });
+    </script>
+  </body>
+</html>

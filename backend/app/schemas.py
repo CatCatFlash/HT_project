@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 
 RiskLevel = Literal["high", "medium", "low"]
-TaskStatus = Literal["uploaded", "parsed", "analyzing", "success", "failed"]
+TaskStatus = Literal["uploaded", "parsing", "parsed", "analyzing", "success", "failed"]
 
 
 class ApiResponse(BaseModel):
@@ -16,6 +16,7 @@ class ApiResponse(BaseModel):
 class ErrorResponse(BaseModel):
     success: bool = False
     error: dict
+    trace_id: str
 
 
 class RiskItem(BaseModel):
@@ -41,14 +42,19 @@ class TextSubmitRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=100_000)
 
 
+class UploadInlineRequest(BaseModel):
+    file_name: str = Field(..., min_length=1, max_length=255)
+    file_content_base64: str = Field(..., min_length=1)
+
+
 class UploadResponse(BaseModel):
     task_id: str
     file_id: str
     file_name: str
     upload_status: TaskStatus
     parse_status: TaskStatus
-    preview_text: str
-    char_count: int
+    preview_text: str | None = None
+    char_count: int | None = None
     page_count: int | None = None
 
 
@@ -68,6 +74,8 @@ class PreviewResponse(BaseModel):
     char_count: int
     status: TaskStatus
     page_count: int | None = None
+    error_code: str | None = None
+    error_message: str | None = None
 
 
 class StartAuditResponse(BaseModel):

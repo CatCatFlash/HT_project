@@ -1,6 +1,10 @@
 const { getRuntimeEnv } = require("../config/env");
 const { getOrCreateAnonymousUserId } = require("../utils/storage");
 
+const UPLOAD_RETRY_LIMIT = 2;
+const UPLOAD_RETRY_DELAY_MS = 800;
+const INLINE_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
+
 function getBaseURL() {
   return getRuntimeEnv().baseURL;
 }
@@ -66,6 +70,10 @@ function request({ url, method, data, header }) {
 }
 
 function uploadFile(filePath) {
+  return uploadFileWithRetry(filePath, 0);
+}
+
+function uploadFileWithRetry(filePath, attempt) {
   return new Promise((resolve, reject) => {
     wx.uploadFile({
       url: `${getBaseURL()}/api/v1/contracts/upload`,
@@ -90,10 +98,78 @@ function uploadFile(filePath) {
         console.error("[api.uploadFile] fail", {
           url: `${getBaseURL()}/api/v1/contracts/upload`,
           filePath,
+          attempt,
           error,
           debugInfo,
         });
-        reject(classifyUploadFailure(error));
+        const classifiedError = classifyUploadFailure(error);
+        if (shouldRetryUpload(classifiedError, attempt)) {
+          console.warn("[api.uploadFile] retry", {
+            filePath,
+            attempt,
+            nextAttempt: attempt + 1,
+            type: classifiedError.type,
+            details: classifiedError.details,
+          });
+          delay(UPLOAD_RETRY_DELAY_MS * (attempt + 1))
+            .then(() => uploadFileWithRetry(filePath, attempt + 1))
+            .then(resolve)
+            .catch(reject);
+          return;
+        }
+        reject(classifiedError);
+      },
+    });
+  });
+}
+
+function uploadFileInline(filePath, fileName) {
+  return new Promise((resolve, reject) => {
+    wx.getFileSystemManager().readFile({
+      filePath,
+      success: (readResult) => {
+        const fileContent = readResult && readResult.data;
+        let base64 = "";
+
+        if (typeof fileContent === "string") {
+          base64 = fileContent;
+        } else if (fileContent && typeof wx.arrayBufferToBase64 === "function") {
+          base64 = wx.arrayBufferToBase64(fileContent);
+        }
+
+        if (!base64) {
+          reject(createTypedError("文件内容读取失败，请重新选择文件后再试。", "upload-inline-read"));
+          return;
+        }
+
+        const byteLength = typeof fileContent === "string"
+          ? estimateBase64DecodedBytes(fileContent)
+          : (fileContent.byteLength || 0);
+
+        if (byteLength > INLINE_UPLOAD_MAX_BYTES) {
+          reject(createBusinessError("文件大小不能超过 10MB，请压缩后重新上传。", "UPLOAD_FILE_TOO_LARGE"));
+          return;
+        }
+
+        request({
+          url: "/api/v1/contracts/upload-inline",
+          method: "POST",
+          data: {
+            file_name: fileName,
+            file_content_base64: base64,
+          },
+        })
+          .then(mapUploadResponse)
+          .then(resolve)
+          .catch(reject);
+      },
+      fail: (error) => {
+        console.error("[api.uploadFileInline] read fail", {
+          filePath,
+          fileName,
+          error,
+        });
+        reject(classifyRequestFailure(error));
       },
     });
   });
@@ -191,7 +267,7 @@ function classifyUploadFailure(error) {
 
   if (!errMsg) {
     return createTypedError(
-      "文件上传未发出，请优先检查小程序后台是否已单独配置 uploadFile 合法域名，并确认真机网络允许访问当前 HTTPS 域名。",
+      "文件上传未发出，请优先检查小程序后台是否已单独配置 uploadFile 合法域名，并确认当前网络允许访问该 HTTPS 域名。",
       "upload-config",
       JSON.stringify(debugInfo)
     );
@@ -202,10 +278,33 @@ function classifyUploadFailure(error) {
   }
 
   if (isConnectionFailure(errMsg)) {
-    return createTypedError("文件上传失败，请检查当前网络连接后重试。", "network", errMsg);
+    return createTypedError("文件上传连接失败，请检查当前网络后重试。", "network", errMsg);
   }
 
   return createTypedError("文件上传失败，请稍后重试。", "upload", errMsg);
+}
+
+function shouldRetryUpload(error, attempt) {
+  if (!error || attempt >= UPLOAD_RETRY_LIMIT) {
+    return false;
+  }
+
+  if (error.type === "network-timeout") {
+    return true;
+  }
+
+  if (error.type !== "network") {
+    return false;
+  }
+
+  const details = normalizeText(error.details).toLowerCase();
+  return [
+    "err_connection_reset",
+    "connection reset",
+    "errcode:-101",
+    "cronet_error_code:-101",
+    "software caused connection abort",
+  ].some((keyword) => details.includes(keyword));
 }
 
 function isDomainOrHttpsFailure(errMsg) {
@@ -234,13 +333,20 @@ function isConnectionFailure(errMsg) {
   ].some((keyword) => errMsg.includes(keyword));
 }
 
+function estimateBase64DecodedBytes(base64Text) {
+  const normalized = String(base64Text || "").replace(/\s/g, "");
+  if (!normalized) return 0;
+  const padding = normalized.endsWith("==") ? 2 : normalized.endsWith("=") ? 1 : 0;
+  return Math.floor((normalized.length * 3) / 4) - padding;
+}
+
 function mapUploadResponse(data) {
   return {
     taskId: data.task_id,
     fileId: data.file_id,
     fileName: normalizeText(data.file_name),
-    uploadStatus: data.upload_status,
-    parseStatus: data.parse_status,
+    uploadStatus: data.upload_status || "uploaded",
+    parseStatus: data.parse_status || "parsing",
     previewText: normalizeText(data.preview_text),
     charCount: data.char_count,
     pageCount: data.page_count || null,
@@ -264,8 +370,10 @@ function mapPreviewResponse(data) {
     parsedText: normalizeText(data.parsed_text),
     previewText: normalizeText(data.preview_text),
     charCount: data.char_count,
-    status: data.status,
+    status: data.status || data.parse_status || "parsed",
     pageCount: data.page_count || null,
+    errorCode: data.error_code || "",
+    errorMessage: normalizeText(data.error_message),
   };
 }
 
@@ -287,12 +395,8 @@ function mapAuditResultResponse(data) {
   const normalizedAdditionalRisks = normalizeRiskItems(additionalRiskSource);
 
   const usesSplitRiskStructure = normalizedCoreRisks.length || normalizedAdditionalRisks.length;
-  const coreRisks = usesSplitRiskStructure
-    ? normalizedCoreRisks
-    : normalizedLegacyRisks.slice(0, 3);
-  const additionalRisks = usesSplitRiskStructure
-    ? normalizedAdditionalRisks
-    : normalizedLegacyRisks.slice(3);
+  const coreRisks = usesSplitRiskStructure ? normalizedCoreRisks : normalizedLegacyRisks.slice(0, 3);
+  const additionalRisks = usesSplitRiskStructure ? normalizedAdditionalRisks : normalizedLegacyRisks.slice(3);
   const allRisks = coreRisks.concat(additionalRisks);
 
   const summarySource = data.summary || (data.result
@@ -372,6 +476,7 @@ function mapHistoryResponse(data) {
 function mapStatusText(status) {
   const statusMap = {
     uploaded: "已上传",
+    parsing: "解析中",
     parsed: "已解析",
     analyzing: "审核中",
     success: "审核完成",
@@ -507,6 +612,12 @@ function normalizeText(value) {
   return String(value).replace(/\r\n/g, "\n").replace(/\u0000/g, "").trim();
 }
 
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 function extractClientErrorInfo(error) {
   if (!error || typeof error !== "object") {
     return {
@@ -545,6 +656,7 @@ module.exports = {
   getBaseURL,
   getHeaders,
   uploadFile,
+  uploadFileInline,
   submitText,
   getPreview,
   startAudit,

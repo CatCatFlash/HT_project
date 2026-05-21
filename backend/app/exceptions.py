@@ -1,8 +1,9 @@
 class AppError(Exception):
-    def __init__(self, code: str, message: str, status_code: int = 400):
+    def __init__(self, code: str, message: str, status_code: int = 400, phase: str | None = None):
         self.code = code
         self.message = message
         self.status_code = status_code
+        self.phase = phase
         super().__init__(message)
 
 

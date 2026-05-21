@@ -25,7 +25,7 @@ from ..config import (
 )
 from ..exceptions import AuditError
 from .result_formatter import MAX_CORE_RISKS, STRATEGY_VERSION, normalize_audit_result
-from .text_parser import assess_text_readability
+from .text_parser import assess_text_readability, should_use_conservative_audit
 
 
 logger = logging.getLogger(__name__)
@@ -78,7 +78,7 @@ class MockAuditService:
         if len(text) < 30:
             raise AuditError("AUDIT_EMPTY_RESULT", "未识别到有效合同内容，请检查后重试", 400)
 
-        if not readability["is_readable"]:
+        if should_use_conservative_audit(parsed_text):
             return normalize_audit_result(
                 {
                     "overall_message": "合同文本可读性较差，当前无法稳定识别关键条款，建议先修复文本后再发起审核。",

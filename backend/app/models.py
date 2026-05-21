@@ -4,6 +4,7 @@ from typing import Any
 
 
 TASK_STATUS_UPLOADED = "uploaded"
+TASK_STATUS_PARSING = "parsing"
 TASK_STATUS_PARSED = "parsed"
 TASK_STATUS_ANALYZING = "analyzing"
 TASK_STATUS_SUCCESS = "success"

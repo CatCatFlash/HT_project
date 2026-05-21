@@ -1,16 +1,20 @@
+import base64
+import logging
 from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, UploadFile
+from pypdf import PdfReader
 
 from .. import database
 from ..deps import get_user_id
-from ..exceptions import AuditError, NotFoundError, ParseError
+from ..exceptions import AuditError, NotFoundError, ParseError, UploadError
 from ..models import (
     SOURCE_TYPE_FILE,
     SOURCE_TYPE_TEXT,
     TASK_STATUS_ANALYZING,
     TASK_STATUS_FAILED,
+    TASK_STATUS_PARSING,
     TASK_STATUS_PARSED,
     TASK_STATUS_SUCCESS,
     TASK_STATUS_UPLOADED,
@@ -23,23 +27,27 @@ from ..schemas import (
     StartAuditResponse,
     TextSubmitRequest,
     TextSubmitResponse,
+    UploadInlineRequest,
     UploadResponse,
 )
 from ..services.audit_service import AuditService
 from ..services.file_storage import build_storage_path, validate_upload
-from ..services.text_parser import normalize_text, parse_contract_bytes
+from ..services.text_parser import normalize_text, parse_contract_content
+from ..trace import get_trace_id
 
 router = APIRouter(prefix="/api/v1/contracts", tags=["contracts"])
 audit_service = AuditService()
+logger = logging.getLogger(__name__)
 
 
 def _status_text(status: str) -> str:
     mapping = {
-        "uploaded": "已上传",
-        "parsed": "已解析",
-        "analyzing": "审核中",
-        "success": "审核完成",
-        "failed": "审核失败",
+        TASK_STATUS_UPLOADED: "已上传",
+        TASK_STATUS_PARSING: "解析中",
+        TASK_STATUS_PARSED: "已解析",
+        TASK_STATUS_ANALYZING: "审核中",
+        TASK_STATUS_SUCCESS: "审核完成",
+        TASK_STATUS_FAILED: "处理失败",
     }
     return mapping.get(status, status)
 
@@ -52,25 +60,34 @@ def _history_title(file_name: str | None, source_type: str) -> str:
     return "未命名合同"
 
 
-@router.post("/upload")
-async def upload_contract(
-    file: UploadFile = File(...),
-    user_id: str = Depends(get_user_id),
+def _create_upload_task(
+    *,
+    background_tasks: BackgroundTasks,
+    user_id: str,
+    file_name: str,
+    content: bytes,
+    trace_id: str,
 ) -> dict:
-    content = await file.read()
-    validate_upload(file, len(content))
-    task_id = uuid4().hex
-    parsed_text = ""
-    page_count = None
+    file_size = len(content)
+    validate_upload(type("UploadFileLike", (), {"filename": file_name})(), file_size)
 
-    storage_path = build_storage_path(file.filename or "contract")
+    task_id = uuid4().hex
+    storage_path = build_storage_path(file_name or "contract")
     storage_path.write_bytes(content)
+    logger.info(
+        "upload stored user_id=%s file_name=%s file_size=%s trace_id=%s phase=upload.store task_id=%s",
+        user_id,
+        file_name,
+        file_size,
+        trace_id,
+        task_id,
+    )
 
     database.create_task(
         task_id=task_id,
         user_id=user_id,
         source_type=SOURCE_TYPE_FILE,
-        file_name=file.filename,
+        file_name=file_name,
         file_url=str(storage_path),
         raw_text=None,
         parsed_text=None,
@@ -78,40 +95,121 @@ async def upload_contract(
         strategy_version=None,
         status=TASK_STATUS_UPLOADED,
     )
+    database.update_task(task_id, status=TASK_STATUS_PARSING, error_code=None, error_message=None)
+    background_tasks.add_task(_run_parse_job, task_id, user_id, file_name, content, file_size, trace_id)
+
+    logger.info(
+        "upload completed user_id=%s file_name=%s file_size=%s trace_id=%s phase=upload.completed task_id=%s",
+        user_id,
+        file_name,
+        file_size,
+        trace_id,
+        task_id,
+    )
+    return {
+        "success": True,
+        "data": UploadResponse(
+            task_id=task_id,
+            file_id=task_id,
+            file_name=file_name,
+            upload_status=TASK_STATUS_UPLOADED,
+            parse_status=TASK_STATUS_PARSING,
+            preview_text=None,
+            char_count=None,
+            page_count=None,
+        ).model_dump(),
+    }
+
+
+@router.post("/upload")
+async def upload_contract(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    user_id: str = Depends(get_user_id),
+) -> dict:
+    trace_id = get_trace_id()
+    file_name = (file.filename or "").strip()
+    content = await file.read()
+    file_size = len(content)
+    logger.info(
+        "upload received user_id=%s file_name=%s file_size=%s trace_id=%s phase=upload.received",
+        user_id,
+        file_name,
+        file_size,
+        trace_id,
+    )
 
     try:
-        parsed_text, page_count = parse_contract_bytes(file.filename or "", content)
-        database.update_task(
-            task_id,
-            parsed_text=parsed_text,
-            text_hash=audit_service.build_text_hash(parsed_text),
-            strategy_version=audit_service.strategy_version,
-            status=TASK_STATUS_PARSED,
-            error_code=None,
-            error_message=None,
+        return _create_upload_task(
+            background_tasks=background_tasks,
+            user_id=user_id,
+            file_name=file_name,
+            content=content,
+            trace_id=trace_id,
         )
-    except ParseError as exc:
-        database.update_task(
-            task_id,
-            status=TASK_STATUS_FAILED,
-            error_code=exc.code,
-            error_message=exc.message,
+    except UploadError as exc:
+        logger.warning(
+            "upload rejected user_id=%s file_name=%s file_size=%s trace_id=%s phase=%s code=%s",
+            user_id,
+            file_name,
+            file_size,
+            trace_id,
+            exc.phase or "upload.validate",
+            exc.code,
         )
         raise
 
-    preview_text = parsed_text[:2000]
-    payload = UploadResponse(
-        task_id=task_id,
-        file_id=task_id,
-        file_name=file.filename or "",
-        upload_status=TASK_STATUS_UPLOADED,
-        parse_status=TASK_STATUS_PARSED,
-        preview_text=preview_text,
-        char_count=len(parsed_text),
-    ).model_dump()
-    if page_count is not None:
-        payload["page_count"] = page_count
-    return {"success": True, "data": payload}
+
+@router.post("/upload-inline")
+async def upload_contract_inline(
+    request: UploadInlineRequest,
+    background_tasks: BackgroundTasks,
+    user_id: str = Depends(get_user_id),
+) -> dict:
+    trace_id = get_trace_id()
+    file_name = (request.file_name or "").strip()
+    try:
+        content = base64.b64decode(request.file_content_base64, validate=True)
+    except Exception as exc:
+        logger.warning(
+            "upload inline decode failed user_id=%s file_name=%s trace_id=%s phase=upload.decode",
+            user_id,
+            file_name,
+            trace_id,
+        )
+        raise UploadError(
+            "UPLOAD_INVALID_CONTENT",
+            "文件内容无法识别，请重新选择文件后再上传",
+            400,
+            phase="upload.decode",
+        ) from exc
+
+    logger.info(
+        "upload inline received user_id=%s file_name=%s file_size=%s trace_id=%s phase=upload.inline.received",
+        user_id,
+        file_name,
+        len(content),
+        trace_id,
+    )
+    try:
+        return _create_upload_task(
+            background_tasks=background_tasks,
+            user_id=user_id,
+            file_name=file_name,
+            content=content,
+            trace_id=trace_id,
+        )
+    except UploadError as exc:
+        logger.warning(
+            "upload inline rejected user_id=%s file_name=%s file_size=%s trace_id=%s phase=%s code=%s",
+            user_id,
+            file_name,
+            len(content),
+            trace_id,
+            exc.phase or "upload.inline",
+            exc.code,
+        )
+        raise
 
 
 @router.post("/text")
@@ -152,8 +250,7 @@ async def get_preview(task_id: str, user_id: str = Depends(get_user_id)) -> dict
     task = database.fetch_task(task_id, user_id)
     if not task:
         raise NotFoundError("审核任务不存在")
-    if task.status == TASK_STATUS_FAILED and not task.parsed_text:
-        raise ParseError(task.error_code or "PARSE_FAILED", task.error_message or "解析失败", 400)
+
     parsed_text = task.parsed_text or ""
     return {
         "success": True,
@@ -165,6 +262,9 @@ async def get_preview(task_id: str, user_id: str = Depends(get_user_id)) -> dict
             preview_text=parsed_text[:2000],
             char_count=len(parsed_text),
             status=task.status,
+            page_count=_read_pdf_page_count(task.file_url),
+            error_code=task.error_code,
+            error_message=task.error_message,
         ).model_dump(),
     }
 
@@ -178,8 +278,10 @@ async def start_audit(
     task = database.fetch_task(task_id, user_id)
     if not task:
         raise NotFoundError("审核任务不存在")
+    if task.status == TASK_STATUS_PARSING:
+        raise ParseError("PARSE_IN_PROGRESS", "合同内容仍在解析中，请稍后再发起审核", 409)
     if not task.parsed_text:
-        raise ParseError("PARSE_EMPTY_CONTENT", "当前任务没有可审核的解析文本", 400)
+        raise ParseError("PARSE_EMPTY_CONTENT", "当前任务还没有可审核的解析文本", 400)
 
     database.update_task(task_id, status=TASK_STATUS_ANALYZING, error_code=None, error_message=None)
     background_tasks.add_task(_run_audit_job, task_id, user_id)
@@ -204,6 +306,7 @@ async def get_audit_result(task_id: str, user_id: str = Depends(get_user_id)) ->
     effective_status = task.status
     if result_payload and task.status == TASK_STATUS_ANALYZING:
         effective_status = TASK_STATUS_SUCCESS
+
     summary_payload = None
     risks_payload = None
     if result_payload:
@@ -273,6 +376,65 @@ async def delete_history(task_id: str, user_id: str = Depends(get_user_id)) -> d
     return {"success": True, "data": DeleteResponse(task_id=task_id, deleted=deleted).model_dump()}
 
 
+def _run_parse_job(task_id: str, user_id: str, file_name: str, content: bytes, file_size: int, trace_id: str) -> None:
+    try:
+        parse_outcome = parse_contract_content(file_name, content)
+        parsed_text = parse_outcome.text
+        database.update_task(
+            task_id,
+            parsed_text=parsed_text,
+            text_hash=audit_service.build_text_hash(parsed_text),
+            strategy_version=audit_service.strategy_version,
+            status=TASK_STATUS_PARSED,
+            error_code=None,
+            error_message=None,
+        )
+        logger.info(
+            "upload parsed user_id=%s file_name=%s file_size=%s trace_id=%s phase=upload.parse task_id=%s char_count=%s parser_used=%s fallback_used=%s readable=%s",
+            user_id,
+            file_name,
+            file_size,
+            trace_id,
+            task_id,
+            len(parsed_text),
+            parse_outcome.parser_used,
+            parse_outcome.fallback_used,
+            parse_outcome.readability["is_readable"] if parse_outcome.readability else None,
+        )
+    except ParseError as exc:
+        database.update_task(
+            task_id,
+            status=TASK_STATUS_FAILED,
+            error_code=exc.code,
+            error_message=exc.message,
+        )
+        logger.warning(
+            "upload parse failed user_id=%s file_name=%s file_size=%s trace_id=%s phase=%s task_id=%s code=%s",
+            user_id,
+            file_name,
+            file_size,
+            trace_id,
+            exc.phase or "upload.parse",
+            task_id,
+            exc.code,
+        )
+    except Exception:
+        database.update_task(
+            task_id,
+            status=TASK_STATUS_FAILED,
+            error_code="PARSE_INTERNAL_ERROR",
+            error_message="文件已上传成功，但解析失败，请稍后重试或改用其他格式",
+        )
+        logger.exception(
+            "upload parse unexpected error user_id=%s file_name=%s file_size=%s trace_id=%s phase=upload.parse task_id=%s",
+            user_id,
+            file_name,
+            file_size,
+            trace_id,
+            task_id,
+        )
+
+
 def _run_audit_job(task_id: str, user_id: str) -> None:
     task = database.fetch_task(task_id, user_id)
     if not task or not task.parsed_text:
@@ -302,3 +464,16 @@ def _run_audit_job(task_id: str, user_id: str) -> None:
             error_code="AUDIT_FAILED",
             error_message="审核失败，请稍后重试",
         )
+
+
+def _read_pdf_page_count(file_url: str | None) -> int | None:
+    if not file_url:
+        return None
+    path = Path(file_url)
+    if path.suffix.lower() != ".pdf" or not path.exists():
+        return None
+    try:
+        reader = PdfReader(str(path))
+        return len(reader.pages)
+    except Exception:
+        return None
