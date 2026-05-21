@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import socket
@@ -5,6 +6,7 @@ import time
 from typing import Any
 from urllib import error, request
 
+from .. import database
 from ..config import (
     AUDIT_ALLOW_MOCK_FALLBACK,
     AUDIT_MODEL_MAX_INPUT_CHARS,
@@ -22,7 +24,7 @@ from ..config import (
     LOG_LEVEL,
 )
 from ..exceptions import AuditError
-from .result_formatter import normalize_audit_result
+from .result_formatter import MAX_CORE_RISKS, STRATEGY_VERSION, normalize_audit_result
 from .text_parser import assess_text_readability
 
 
@@ -50,9 +52,10 @@ SYSTEM_PROMPT = """你是合同初审助手，只能输出一个 JSON 对象。
     }
   ]
 }
-3. 最多返回 3 条风险。
+3. 默认优先返回 3 条核心风险，可包含少量补充风险，但不要泛滥罗列。
 4. 如果文本过短、可读性差或证据不足，只返回 1 到 2 条提醒，不要泛化推断。
 5. 风险标题、原因、建议必须互相一致，且必须围绕合同条款本身。
+6. 相似风险不要换不同说法重复表达。
 """
 
 
@@ -62,6 +65,7 @@ def _build_user_prompt(parsed_text: str) -> str:
         "请审查下面合同文本，只输出 JSON。\n"
         "重点关注付款、验收、违约、续约、保密、知识产权、争议解决。\n"
         "如果原文没有直接证据，不要推断。\n"
+        "优先输出最核心的 3 条风险，如有必要可增加少量补充风险。\n"
         f"文本可读性参考：{json.dumps(readability, ensure_ascii=False)}\n\n"
         f"合同文本：\n{parsed_text}"
     )
@@ -119,6 +123,15 @@ class MockAuditService:
                     "suggestion": "建议增加续约提醒和通知期限，并明确书面拒绝续约的操作方式。",
                 }
             )
+        if "验收" in text or "交付" in text:
+            risks.append(
+                {
+                    "title": "验收标准可能缺失",
+                    "level": "medium",
+                    "reason": "如果验收标准、验收流程或验收期限不够明确，容易导致付款与履约争议。",
+                    "suggestion": "建议补充验收标准、验收流程、验收期限及不合格处理方式。",
+                }
+            )
         if "保密" not in text and "confidential" not in lowered:
             risks.append(
                 {
@@ -141,8 +154,8 @@ class MockAuditService:
 
         return normalize_audit_result(
             {
-                "overall_message": "本次为通用合同初审结果，建议优先处理高风险条款，复杂场景仍需专业法务复核。",
-                "risks": risks[:3],
+                "overall_message": "本次为通用合同初审结果，建议优先处理核心风险条款，复杂场景仍需专业法务复核。",
+                "risks": risks[:5],
             }
         )
 
@@ -179,12 +192,13 @@ class DeepSeekAuditService:
                 normalized_result = normalize_audit_result(parsed_result)
                 self._validate_result_quality(normalized_result, clipped_text)
                 logger.info(
-                    "audit model call succeeded provider=deepseek profile=%s model=%s attempt=%s elapsed=%.2fs total_risks=%s",
+                    "audit model call succeeded provider=deepseek profile=%s model=%s attempt=%s elapsed=%.2fs total_risks=%s core_risks=%s",
                     AUDIT_PROFILE,
                     self.model,
                     attempt,
                     time.time() - started,
                     normalized_result["total_risks"],
+                    len(normalized_result["core_risks"]),
                 )
                 return normalized_result
             except AuditError as exc:
@@ -277,8 +291,8 @@ class DeepSeekAuditService:
         readability = assess_text_readability(parsed_text)
         if normalized_result["total_risks"] <= 0:
             raise AuditError("AUDIT_EMPTY_RESULT", "DeepSeek 未返回有效审核结果，请稍后重试", 502)
-        if normalized_result["total_risks"] > 3:
-            raise AuditError("AUDIT_RESULT_OVERINFERRED", "DeepSeek 返回的风险数量超过当前上限，准备重试", 502)
+        if len(normalized_result["core_risks"]) > MAX_CORE_RISKS:
+            raise AuditError("AUDIT_RESULT_OVERINFERRED", "DeepSeek 返回的核心风险数量超过当前上限，准备重试", 502)
         if not readability["is_readable"] and normalized_result["total_risks"] > 2:
             raise AuditError("AUDIT_RESULT_OVERINFERRED", "DeepSeek 在文本不可读场景下输出了过多风险，准备重试", 502)
         if len(parsed_text) < 150 and normalized_result["high_risks"] > 2:
@@ -314,10 +328,33 @@ class AuditService:
     def __init__(self) -> None:
         self.mock_service = MockAuditService()
         self.deepseek_service = DeepSeekAuditService()
+        self.strategy_version = STRATEGY_VERSION
 
-    def analyze(self, parsed_text: str) -> dict:
+    def build_text_hash(self, parsed_text: str) -> str:
+        return hashlib.sha256(parsed_text.strip().encode("utf-8")).hexdigest()
+
+    def analyze(self, parsed_text: str, *, user_id: str | None = None) -> dict:
         provider = AUDIT_PROVIDER or "deepseek"
         readability = assess_text_readability(parsed_text)
+        text_hash = self.build_text_hash(parsed_text)
+
+        if user_id:
+            reusable = database.find_reusable_audit_result(
+                user_id=user_id,
+                text_hash=text_hash,
+                strategy_version=self.strategy_version,
+            )
+            if reusable:
+                result = reusable["result_json"]
+                result["overall_message"] = _append_reuse_hint(result["overall_message"])
+                logger.info(
+                    "audit result reused provider=%s strategy=%s source_task=%s",
+                    provider,
+                    self.strategy_version,
+                    reusable["task_id"],
+                )
+                return result
+
         if provider != "deepseek":
             logger.warning("unsupported audit provider=%s, falling back to mock", provider)
             return self._mock_result(parsed_text, "当前未启用 DeepSeek，已降级到 mock 审核。")
@@ -387,3 +424,10 @@ def _looks_like_contract_audit(result: dict) -> bool:
         "intellectual property",
     ]
     return any(keyword.lower() in text for keyword in keywords)
+
+
+def _append_reuse_hint(message: str) -> str:
+    hint = "检测到相同内容，本次已复用最近一次标准化审核结果。"
+    if hint in message:
+        return message
+    return f"{message} {hint}".strip()

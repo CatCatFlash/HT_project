@@ -11,6 +11,7 @@ MAX_FILE_SIZE = 10 * 1024 * 1024
 MAX_TEXT_LENGTH = 100_000
 PREVIEW_LIMIT = 2_000
 SUPPORTED_EXTENSIONS = {".pdf", ".doc", ".docx"}
+APP_ENV = (os.getenv("APP_ENV") or os.getenv("ENV") or "dev").strip().lower()
 
 
 def _get_bool(name: str, default: bool) -> bool:
@@ -54,6 +55,11 @@ AUDIT_MODEL_MAX_OUTPUT_TOKENS = int(os.getenv("AUDIT_MODEL_MAX_OUTPUT_TOKENS", D
 AUDIT_ALLOW_MOCK_FALLBACK = _get_bool("AUDIT_ALLOW_MOCK_FALLBACK", True)
 AUDIT_REQUIRE_CONTRACT_KEYWORDS = _get_bool("AUDIT_REQUIRE_CONTRACT_KEYWORDS", True)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+ALLOW_DEMO_USER_FALLBACK = _get_bool(
+    "ALLOW_DEMO_USER_FALLBACK",
+    APP_ENV not in {"prod", "production"},
+)
+DEMO_USER_FALLBACK_VALUE = (os.getenv("DEMO_USER_FALLBACK_VALUE") or "demo-user").strip()
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)

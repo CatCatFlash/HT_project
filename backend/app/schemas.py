@@ -26,11 +26,14 @@ class RiskItem(BaseModel):
 
 
 class AuditStructuredResult(BaseModel):
+    strategy_version: str | None = None
     total_risks: int
     high_risks: int
     medium_risks: int
     low_risks: int
     overall_message: str
+    core_risks: list[RiskItem] | None = None
+    additional_risks: list[RiskItem] | None = None
     risks: list[RiskItem]
 
 
@@ -104,3 +107,43 @@ class HistoryItem(BaseModel):
 class DeleteResponse(BaseModel):
     task_id: str
     deleted: bool
+
+
+ProgressStatus = Literal["on-track", "attention", "risk"]
+
+
+class ProgressDialogItem(BaseModel):
+    id: int
+    name: str
+    owner: str
+    progress: int = Field(..., ge=0, le=100)
+    status: ProgressStatus
+    phase: str
+    summary: str
+    blockers: str
+    next_step: str
+    due_label: str
+    updated_at: datetime
+
+
+class ProgressDialogUpdateRequest(BaseModel):
+    owner: str = Field(..., min_length=1, max_length=50)
+    progress: int = Field(..., ge=0, le=100)
+    status: ProgressStatus
+    phase: str = Field(..., min_length=1, max_length=50)
+    summary: str = Field(..., min_length=1, max_length=300)
+    blockers: str = Field(..., min_length=1, max_length=300)
+    next_step: str = Field(..., min_length=1, max_length=300)
+    due_label: str = Field(..., min_length=1, max_length=50)
+
+
+class ProgressOverview(BaseModel):
+    completion: int
+    healthy_count: int
+    attention_count: int
+    risk_count: int
+
+
+class ProgressDashboardResponse(BaseModel):
+    overview: ProgressOverview
+    items: list[ProgressDialogItem]

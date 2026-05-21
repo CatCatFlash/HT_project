@@ -1,28 +1,39 @@
-const DEFAULT_BASE_URL = "http://127.0.0.1:8010";
-const DEFAULT_USER_ID = "demo-user";
+const { getRuntimeEnv } = require("../config/env");
+const { getOrCreateAnonymousUserId } = require("../utils/storage");
 
 function getBaseURL() {
-  return DEFAULT_BASE_URL;
+  return getRuntimeEnv().baseURL;
 }
 
-function getHeaders(extraHeaders) {
-  return {
-    "Content-Type": "application/json",
-    "X-User-Id": DEFAULT_USER_ID,
+function getUserId() {
+  return getOrCreateAnonymousUserId();
+}
+
+function getHeaders(extraHeaders, options) {
+  const nextOptions = options || {};
+  const headers = {
+    "X-User-Id": getUserId(),
     ...(extraHeaders || {}),
   };
+
+  if (nextOptions.includeJsonContentType !== false) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  return headers;
 }
 
 function unwrapResponse(response) {
   const { statusCode, data } = response;
+
   if (statusCode < 200 || statusCode >= 300) {
     const message = data && data.error && data.error.message ? data.error.message : "请求失败，请稍后重试";
-    throw new Error(message);
+    throw createBusinessError(message, data && data.error && data.error.code);
   }
 
   if (!data || data.success !== true) {
     const message = data && data.error && data.error.message ? data.error.message : "服务返回异常";
-    throw new Error(message);
+    throw createBusinessError(message, data && data.error && data.error.code);
   }
 
   return data.data;
@@ -42,8 +53,13 @@ function request({ url, method, data, header }) {
           reject(error);
         }
       },
-      fail: () => {
-        reject(new Error("无法连接后端服务，请确认本地接口已启动且 baseURL 配置正确。"));
+      fail: (error) => {
+        console.error("[api.request] fail", {
+          url: `${getBaseURL()}${url}`,
+          method,
+          error,
+        });
+        reject(classifyRequestFailure(error));
       },
     });
   });
@@ -55,9 +71,8 @@ function uploadFile(filePath) {
       url: `${getBaseURL()}/api/v1/contracts/upload`,
       filePath,
       name: "file",
-      header: {
-        "X-User-Id": DEFAULT_USER_ID,
-      },
+      header: getHeaders({}, { includeJsonContentType: false }),
+      timeout: 120000,
       success: (response) => {
         try {
           const parsed = typeof response.data === "string" ? JSON.parse(response.data) : response.data;
@@ -70,8 +85,15 @@ function uploadFile(filePath) {
           reject(error);
         }
       },
-      fail: () => {
-        reject(new Error("文件上传失败，请检查网络或后端服务状态。"));
+      fail: (error) => {
+        const debugInfo = extractClientErrorInfo(error);
+        console.error("[api.uploadFile] fail", {
+          url: `${getBaseURL()}/api/v1/contracts/upload`,
+          filePath,
+          error,
+          debugInfo,
+        });
+        reject(classifyUploadFailure(error));
       },
     });
   });
@@ -123,14 +145,103 @@ function deleteHistory(taskId) {
   }));
 }
 
+function createBusinessError(message, code) {
+  const error = new Error(message);
+  error.type = "business";
+  error.code = code || "";
+  return error;
+}
+
+function createTypedError(message, type, details) {
+  const error = new Error(message);
+  error.type = type;
+  error.details = details || "";
+  return error;
+}
+
+function classifyRequestFailure(error) {
+  const errMsg = normalizeText(error && error.errMsg).toLowerCase();
+
+  if (isDomainOrHttpsFailure(errMsg)) {
+    return createTypedError(
+      "当前网络请求未通过，请确认小程序已配置合法 HTTPS 域名，且证书与服务均可正常访问。",
+      "domain",
+      errMsg
+    );
+  }
+
+  if (isTimeoutFailure(errMsg)) {
+    return createTypedError("网络请求超时，请检查网络后重试。", "network-timeout", errMsg);
+  }
+
+  return createTypedError("网络连接失败，请检查当前网络后重试。", "network", errMsg);
+}
+
+function classifyUploadFailure(error) {
+  const debugInfo = extractClientErrorInfo(error);
+  const errMsg = normalizeText(debugInfo.errMsg).toLowerCase();
+
+  if (isDomainOrHttpsFailure(errMsg)) {
+    return createTypedError(
+      "文件上传未通过，请确认小程序已配置合法 HTTPS 域名，且线上证书与上传服务可正常访问。",
+      "domain",
+      errMsg
+    );
+  }
+
+  if (!errMsg) {
+    return createTypedError(
+      "文件上传未发出，请优先检查小程序后台是否已单独配置 uploadFile 合法域名，并确认真机网络允许访问当前 HTTPS 域名。",
+      "upload-config",
+      JSON.stringify(debugInfo)
+    );
+  }
+
+  if (isTimeoutFailure(errMsg)) {
+    return createTypedError("文件上传超时，请检查网络后重新上传。", "network-timeout", errMsg);
+  }
+
+  if (isConnectionFailure(errMsg)) {
+    return createTypedError("文件上传失败，请检查当前网络连接后重试。", "network", errMsg);
+  }
+
+  return createTypedError("文件上传失败，请稍后重试。", "upload", errMsg);
+}
+
+function isDomainOrHttpsFailure(errMsg) {
+  return [
+    "url not in domain list",
+    "url scheme is invalid",
+    "ssl",
+    "certificate",
+    "cert",
+    "tls",
+    "https",
+  ].some((keyword) => errMsg.includes(keyword));
+}
+
+function isTimeoutFailure(errMsg) {
+  return errMsg.includes("timeout");
+}
+
+function isConnectionFailure(errMsg) {
+  return [
+    "request:fail",
+    "uploadfile:fail",
+    "fail connect",
+    "unable to resolve host",
+    "network",
+  ].some((keyword) => errMsg.includes(keyword));
+}
+
 function mapUploadResponse(data) {
   return {
     taskId: data.task_id,
     fileId: data.file_id,
-    fileName: data.file_name,
+    fileName: normalizeText(data.file_name),
     uploadStatus: data.upload_status,
     parseStatus: data.parse_status,
-    previewText: data.preview_text,
+    previewText: normalizeText(data.preview_text),
     charCount: data.char_count,
     pageCount: data.page_count || null,
   };
@@ -140,7 +251,7 @@ function mapTextResponse(data) {
   return {
     taskId: data.task_id,
     status: data.status,
-    previewText: data.preview_text,
+    previewText: normalizeText(data.preview_text),
     charCount: data.char_count,
   };
 }
@@ -149,9 +260,9 @@ function mapPreviewResponse(data) {
   return {
     taskId: data.task_id,
     sourceType: data.source_type,
-    fileName: data.file_name || "",
-    parsedText: data.parsed_text,
-    previewText: data.preview_text,
+    fileName: normalizeText(data.file_name),
+    parsedText: normalizeText(data.parsed_text),
+    previewText: normalizeText(data.preview_text),
     charCount: data.char_count,
     status: data.status,
     pageCount: data.page_count || null,
@@ -167,6 +278,23 @@ function mapStartAuditResponse(data) {
 }
 
 function mapAuditResultResponse(data) {
+  const legacyRisks = Array.isArray(data.risks) ? data.risks : (data.result ? data.result.risks || [] : []);
+  const coreRiskSource = Array.isArray(data.core_risks) ? data.core_risks : [];
+  const additionalRiskSource = Array.isArray(data.additional_risks) ? data.additional_risks : [];
+
+  const normalizedLegacyRisks = normalizeRiskItems(legacyRisks);
+  const normalizedCoreRisks = normalizeRiskItems(coreRiskSource);
+  const normalizedAdditionalRisks = normalizeRiskItems(additionalRiskSource);
+
+  const usesSplitRiskStructure = normalizedCoreRisks.length || normalizedAdditionalRisks.length;
+  const coreRisks = usesSplitRiskStructure
+    ? normalizedCoreRisks
+    : normalizedLegacyRisks.slice(0, 3);
+  const additionalRisks = usesSplitRiskStructure
+    ? normalizedAdditionalRisks
+    : normalizedLegacyRisks.slice(3);
+  const allRisks = coreRisks.concat(additionalRisks);
+
   const summarySource = data.summary || (data.result
     ? {
         total_risks: data.result.total_risks,
@@ -176,15 +304,45 @@ function mapAuditResultResponse(data) {
         overall_message: data.result.overall_message,
       }
     : null);
-  const risksSource = data.risks || (data.result ? data.result.risks || [] : []);
 
   return {
     taskId: data.task_id,
     status: data.status,
     errorCode: data.error_code,
-    errorMessage: data.error_message,
-    summary: summarySource,
-    risks: risksSource,
+    errorMessage: normalizeText(data.error_message),
+    summary: normalizeSummary(summarySource, allRisks),
+    risks: allRisks,
+    coreRisks,
+    additionalRisks,
+    reusedRecentResult: Boolean(
+      data.reused_recent_result ||
+      data.reused_result ||
+      data.result_reused ||
+      data.hit_cache
+    ),
+  };
+}
+
+function normalizeRiskItems(risksSource) {
+  return (risksSource || [])
+    .filter((item) => item && (item.title || item.reason || item.suggestion))
+    .map((item, index) => normalizeRiskItem(item, index))
+    .sort(compareRiskItems);
+}
+
+function normalizeRiskItem(item, index) {
+  const rawTitle = normalizeText(item.title) || `风险提示 ${index + 1}`;
+  const normalizedTitle = normalizeRiskTitle(rawTitle);
+
+  return {
+    title: normalizedTitle,
+    level: normalizeRiskLevel(item.level),
+    reason: normalizeSentence(
+      normalizeText(item.reason) || "已识别到潜在风险，但当前未返回完整原因说明。"
+    ),
+    suggestion: normalizeSuggestion(
+      normalizeText(item.suggestion) || "建议结合合同原文继续人工复核，并补充更明确的修改方案。"
+    ),
   };
 }
 
@@ -193,21 +351,194 @@ function mapHistoryResponse(data) {
     items: (data.items || []).map((item) => ({
       id: item.id || item.task_id,
       taskId: item.task_id,
-      title: item.title || item.file_name || "粘贴合同内容",
+      title: normalizeText(item.title) || normalizeText(item.file_name) || "粘贴合同内容",
       sourceType: item.source_type,
-      fileName: item.file_name || "",
+      fileName: normalizeText(item.file_name),
       status: item.status,
-      statusText: item.status_text || item.status,
-      totalRisks: item.total_risks || 0,
-      highRisks: item.high_risks || 0,
-      mediumRisks: item.medium_risks || 0,
-      lowRisks: item.low_risks || 0,
-      overallMessage: item.overall_message || "",
+      statusText: normalizeText(item.status_text) || mapStatusText(item.status),
+      totalRisks: toSafeNumber(item.total_risks, 0),
+      highRisks: toSafeNumber(item.high_risks, 0),
+      mediumRisks: toSafeNumber(item.medium_risks, 0),
+      lowRisks: toSafeNumber(item.low_risks, 0),
+      overallMessage: normalizeText(item.overall_message),
       createdAt: item.created_at,
       updatedAt: item.updated_at,
       completedAt: item.completed_at || "",
+      displayTime: formatDateTime(item.completed_at || item.updated_at || item.created_at),
     })),
   };
+}
+
+function mapStatusText(status) {
+  const statusMap = {
+    uploaded: "已上传",
+    parsed: "已解析",
+    analyzing: "审核中",
+    success: "审核完成",
+    failed: "审核失败",
+  };
+  return statusMap[status] || status || "未知状态";
+}
+
+function normalizeSummary(summarySource, normalizedRisks) {
+  const fallbackMessage = normalizedRisks.length
+    ? "已完成合同初审，请结合业务场景继续复核风险内容。"
+    : "已完成合同初审，当前未识别到明确风险项，建议结合原文人工复核。";
+  const countedSummary = buildSummaryFromRisks(
+    normalizedRisks,
+    normalizeText(summarySource && summarySource.overall_message) || fallbackMessage
+  );
+
+  if (!summarySource) {
+    return countedSummary;
+  }
+
+  const totalRisks = toSafeNumber(summarySource.total_risks, countedSummary.total_risks);
+  const highRisks = toSafeNumber(summarySource.high_risks, countedSummary.high_risks);
+  const mediumRisks = toSafeNumber(summarySource.medium_risks, countedSummary.medium_risks);
+  const lowRisks = toSafeNumber(summarySource.low_risks, countedSummary.low_risks);
+  const inconsistent = totalRisks !== normalizedRisks.length || highRisks + mediumRisks + lowRisks !== normalizedRisks.length;
+
+  return {
+    total_risks: inconsistent ? countedSummary.total_risks : totalRisks,
+    high_risks: inconsistent ? countedSummary.high_risks : highRisks,
+    medium_risks: inconsistent ? countedSummary.medium_risks : mediumRisks,
+    low_risks: inconsistent ? countedSummary.low_risks : lowRisks,
+    overall_message: normalizeText(summarySource.overall_message) || countedSummary.overall_message,
+  };
+}
+
+function buildSummaryFromRisks(risks, overallMessage) {
+  return {
+    total_risks: risks.length,
+    high_risks: risks.filter((item) => item.level === "high").length,
+    medium_risks: risks.filter((item) => item.level === "medium").length,
+    low_risks: risks.filter((item) => item.level === "low").length,
+    overall_message: overallMessage,
+  };
+}
+
+function normalizeRiskLevel(level) {
+  const text = normalizeText(level).toLowerCase();
+  if (["high", "h", "严重", "高", "高风险"].includes(text)) return "high";
+  if (["medium", "mid", "m", "中", "中风险"].includes(text)) return "medium";
+  if (["low", "l", "低", "低风险"].includes(text)) return "low";
+  return "medium";
+}
+
+function normalizeRiskTitle(title) {
+  const text = normalizeText(title);
+  const canonicalMap = [
+    { pattern: /(付款|支付).*(不明|模糊|不清|未明确|付款条件不明|支付约定不清)/i, title: "付款条款不明确" },
+    { pattern: /(违约责任).*(不明|模糊|不清|缺失)|责任缺失/i, title: "违约责任不明确" },
+    { pattern: /(自动续约|续签|续费).*(风险|未明确|不清)/i, title: "自动续约风险" },
+    { pattern: /(保密).*(缺失|不足|不明|不清)/i, title: "保密条款不完善" },
+    { pattern: /(争议解决|管辖|仲裁|法院).*(不明|不清|风险)/i, title: "争议解决条款不明确" },
+    { pattern: /(解约|解除).*(不明|不清|模糊|风险)/i, title: "解约条款不明确" },
+    { pattern: /(验收标准|验收).*(不明|不清|缺失|模糊)/i, title: "验收标准不明确" },
+    { pattern: /(知识产权|成果归属).*(不明|不清|缺失|模糊)/i, title: "知识产权归属不明确" },
+  ];
+
+  const matched = canonicalMap.find((item) => item.pattern.test(text));
+  return matched ? matched.title : text;
+}
+
+function normalizeSuggestion(text) {
+  const normalized = normalizeSentence(text);
+  if (!normalized) {
+    return "建议结合合同原文继续人工复核，并补充更明确的修改方案。";
+  }
+
+  if (/^建议/.test(normalized)) {
+    return normalized;
+  }
+
+  return `建议${normalized}`;
+}
+
+function normalizeSentence(text) {
+  const normalized = normalizeText(text).replace(/[；;]/g, "，");
+  if (!normalized) return "";
+  if (/[。！？!?]$/.test(normalized)) {
+    return normalized;
+  }
+  return `${normalized}。`;
+}
+
+function compareRiskItems(a, b) {
+  const levelDiff = getRiskWeight(b.level) - getRiskWeight(a.level);
+  if (levelDiff !== 0) return levelDiff;
+
+  const titleDiff = getRiskTitleWeight(a.title) - getRiskTitleWeight(b.title);
+  if (titleDiff !== 0) return titleDiff;
+
+  return a.title.localeCompare(b.title, "zh-CN");
+}
+
+function getRiskTitleWeight(title) {
+  const rules = [
+    { pattern: /付款/, weight: 1 },
+    { pattern: /违约责任/, weight: 2 },
+    { pattern: /解约/, weight: 3 },
+    { pattern: /自动续约/, weight: 4 },
+    { pattern: /验收标准/, weight: 5 },
+    { pattern: /保密/, weight: 6 },
+    { pattern: /知识产权/, weight: 7 },
+    { pattern: /争议解决/, weight: 8 },
+  ];
+
+  const matched = rules.find((item) => item.pattern.test(title));
+  return matched ? matched.weight : 99;
+}
+
+function getRiskWeight(level) {
+  if (level === "high") return 3;
+  if (level === "medium") return 2;
+  return 1;
+}
+
+function toSafeNumber(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : fallback;
+}
+
+function normalizeText(value) {
+  if (value === null || value === undefined) return "";
+  return String(value).replace(/\r\n/g, "\n").replace(/\u0000/g, "").trim();
+}
+
+function extractClientErrorInfo(error) {
+  if (!error || typeof error !== "object") {
+    return {
+      errMsg: normalizeText(error),
+    };
+  }
+
+  const plain = {};
+  Object.getOwnPropertyNames(error).forEach((key) => {
+    plain[key] = error[key];
+  });
+
+  return {
+    errMsg: normalizeText(error.errMsg || plain.errMsg),
+    errCode: normalizeText(error.errCode || plain.errCode),
+    errno: normalizeText(error.errno || plain.errno),
+    message: normalizeText(error.message || plain.message),
+    stack: normalizeText(error.stack || plain.stack),
+    raw: plain,
+  };
+}
+
+function formatDateTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  const hour = `${date.getHours()}`.padStart(2, "0");
+  const minute = `${date.getMinutes()}`.padStart(2, "0");
+  return `${year}-${month}-${day} ${hour}:${minute}`;
 }
 
 module.exports = {

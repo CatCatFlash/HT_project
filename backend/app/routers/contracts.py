@@ -74,6 +74,8 @@ async def upload_contract(
         file_url=str(storage_path),
         raw_text=None,
         parsed_text=None,
+        text_hash=None,
+        strategy_version=None,
         status=TASK_STATUS_UPLOADED,
     )
 
@@ -82,6 +84,8 @@ async def upload_contract(
         database.update_task(
             task_id,
             parsed_text=parsed_text,
+            text_hash=audit_service.build_text_hash(parsed_text),
+            strategy_version=audit_service.strategy_version,
             status=TASK_STATUS_PARSED,
             error_code=None,
             error_message=None,
@@ -128,6 +132,8 @@ async def submit_contract_text(
         file_url=None,
         raw_text=request.text,
         parsed_text=parsed_text,
+        text_hash=audit_service.build_text_hash(parsed_text),
+        strategy_version=audit_service.strategy_version,
         status=TASK_STATUS_PARSED,
     )
     return {
@@ -279,7 +285,7 @@ def _run_audit_job(task_id: str, user_id: str) -> None:
         return
 
     try:
-        result = audit_service.analyze(task.parsed_text)
+        result = audit_service.analyze(task.parsed_text, user_id=user_id)
         database.save_audit_result(task_id, result)
         database.update_task(task_id, status=TASK_STATUS_SUCCESS, error_code=None, error_message=None)
     except AuditError as exc:
